@@ -1,0 +1,24 @@
+.{
+    .name = .zig_bgfx,
+    .version = "0.0.0",
+    .fingerprint = 0x58e0ebfd604c78e5,
+    .minimum_zig_version = "0.14.0",
+    .dependencies = .{
+        .bgfx = .{
+            .url = "git+https://github.com/bkaradzic/bgfx#0e734522cd8fafa29c8035cbde671ecec62668a3",
+            .hash = "N-V-__8AAB00_QmNC8RQHQHtAwe6lgoAqFessJ9nAMUKbeAW",
+        },
+        .bimg = .{
+            .url = "git+https://github.com/bkaradzic/bimg#446b9eb11130821fd11607c2fc94aee80976e56a",
+            .hash = "N-V-__8AAJg0OQDeaUfXTiHbjQjup50OwF5iPZpwC7oclZIy",
+        },
+        .bx = .{
+            .url = "git+https://github.com/bkaradzic/bx#d3d403170e0153160227621b69ae75c60b3ae7b0",
+            .hash = "N-V-__8AAG0JTQDDwCcEUdgs2I_dtfAkjI7e63s5bdypEMBM",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+}
