@@ -362,6 +362,7 @@ const macos_bgfx_src_files = &.{
 const spirv_tools_cpp_flags = &.{
     "-Wno-switch",
     "-Wno-misleading-indentation",
+    "-fno-sanitize=undefined",
 };
 
 const spirv_tools_src_files = &.{
@@ -588,6 +589,7 @@ const spirv_tools_src_files = &.{
 
 const spirv_cross_cpp_flags = &.{
     "-Wno-type-limits",
+    "-fno-sanitize=undefined",
 };
 
 const spirv_cross_src_files = &.{
@@ -624,6 +626,7 @@ const glslang_cpp_flags = &.{
     "-Wno-unused-const-variable",
     "-Wno-deprecated-register",
     "-Wno-unused-but-set-variable",
+    "-fno-sanitize=undefined",
 };
 
 const glslang_src_files = &.{
@@ -698,6 +701,7 @@ const glsl_optimizer_cpp_flags = &.{
     "-Wno-unused-parameter",
     "-Wno-deprecated-register",
     "-Wno-misleading-indentation",
+    "-fno-sanitize=undefined",
 };
 
 const glsl_optimizer_src_files = &.{
@@ -811,6 +815,7 @@ const fcpp_cpp_flags = &.{
     "-Wno-implicit-fallthrough",
     "-Wno-incompatible-pointer-types",
     "-Wno-parentheses-equality",
+    "-fno-sanitize=undefined",
 };
 
 const fcpp_src_files = &.{
@@ -824,6 +829,7 @@ const fcpp_src_files = &.{
 
 const shaderc_cpp_flags = &.{
     "-fno-rtti",
+    "-fno-sanitize=undefined",
 };
 
 const shaderc_src_files = &.{
