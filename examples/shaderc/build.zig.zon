@@ -1,11 +1,11 @@
 .{
-    .name = .example,
+    .name = .shaderc_example,
     .version = "0.0.0",
-    .fingerprint = 0x6eec9b9f500b08dd,
+    .fingerprint = 0x4e1001b4b556f98d,
     .minimum_zig_version = "0.14.0",
     .dependencies = .{
         .zig_bgfx = .{
-            .path = "..",
+            .path = "../..",
         },
     },
     .paths = .{

@@ -1,0 +1,20 @@
+.{
+    .name = .sdl_bgfx_example,
+    .version = "0.0.0",
+    .fingerprint = 0xf07512385623788,
+    .minimum_zig_version = "0.14.0",
+    .dependencies = .{
+        .zig_bgfx = .{
+            .path = "../..",
+        },
+        .SDL = .{
+            .url = "git+https://github.com/allyourcodebase/SDL#181dd2c6a69a8392a8457a5e80e3ab2e4871e643",
+            .hash = "SDL-2.32.4-JToi30-TEgH42-HFmgINmgFPrAXOjaNp734Jh_wep6ZN",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src/main.zig",
+    },
+}
