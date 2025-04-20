@@ -1,2 +1,4 @@
 /.zig-cache/
 /zig-out/
+/example/.zig-cache/
+/example/zig-out/

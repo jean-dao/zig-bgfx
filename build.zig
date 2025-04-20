@@ -1,30 +1,253 @@
 pub fn build(b: *std.Build) !void {
-    const target = b.standardTargetOptions(.{});
     const bi: BuildInfo = .{
-        .target = target,
+        .target = b.standardTargetOptions(.{}),
         .optimize = b.standardOptimizeOption(.{}),
         .upstream_bgfx = b.dependency("bgfx", .{}),
         .upstream_bimg = b.dependency("bimg", .{}),
         .upstream_bx = b.dependency("bx", .{}),
-        .shaders = try getEnabledShaders(b, target.result.os.tag),
     };
 
-    const build_bgfx = b.option(bool, "bgfx", "Build BGFX library") orelse true;
-    const build_shaderc = b.option(bool, "shaderc", "Build shaderc") orelse true;
+    if (b.option(bool, "bgfx", "Build BGFX library") orelse true)
+        try buildInstallBgfx(b, bi);
 
-    if (!build_bgfx and !build_shaderc) {
-        std.debug.print("nothing to build\n", .{});
-        return;
+    if (b.option(bool, "shaderc", "Build shaderc") orelse false) {
+        const shaderc = buildShaderc(b, bi, bi.optimize);
+        b.installArtifact(shaderc);
     }
-
-    if (build_bgfx)
-        try buildBgfx(b, bi);
-
-    if (build_shaderc)
-        try buildShaderc(b, bi);
 }
 
-fn buildBgfx(b: *std.Build, bi: BuildInfo) !void {
+pub fn buildShader(
+    b: *std.Build,
+    target: std.Target,
+    input: std.Build.LazyPath,
+    shader_type: ShaderType,
+    shader_model: ShaderModel,
+) std.Build.LazyPath {
+    const zig_bgfx = b.dependencyFromBuildZig(@This(), .{});
+    const bi: BuildInfo = .{
+        .target = b.resolveTargetQuery(.{}),
+        .optimize = .Debug,
+        .upstream_bgfx = zig_bgfx.builder.dependency("bgfx", .{}),
+        .upstream_bimg = zig_bgfx.builder.dependency("bimg", .{}),
+        .upstream_bx = zig_bgfx.builder.dependency("bx", .{}),
+    };
+    const shaderc = buildShaderc(b, bi, .Debug);
+    return buildShaderInner(b, bi, shaderc, target, input, "shader.bin", shader_type, shader_model);
+}
+
+pub fn createShaderModule(
+    b: *std.Build,
+    target: std.Target,
+    root_path: []const u8,
+) !std.Build.LazyPath {
+    const zig_bgfx = b.dependencyFromBuildZig(@This(), .{});
+    const bi: BuildInfo = .{
+        .target = b.resolveTargetQuery(.{}),
+        .optimize = .Debug,
+        .upstream_bgfx = zig_bgfx.builder.dependency("bgfx", .{}),
+        .upstream_bimg = zig_bgfx.builder.dependency("bimg", .{}),
+        .upstream_bx = zig_bgfx.builder.dependency("bx", .{}),
+    };
+    const shaderc = buildShaderc(b, bi, .Debug);
+
+    const backends = try getEnabledBackends(b, target.os.tag);
+
+    var root_dir = b.build_root.handle.openDir(root_path, .{ .iterate = true }) catch |err| {
+        std.debug.panic("unable to open '{s}' directory: {s}", .{ root_path, @errorName(err) });
+    };
+    defer root_dir.close();
+
+    const backend_structs: []std.ArrayListUnmanaged(u8) =
+        try b.allocator.alloc(std.ArrayListUnmanaged(u8), backends.len);
+    for (backend_structs) |*backend_struct|
+        backend_struct.* = .empty;
+    defer {
+        for (backend_structs) |*backend_struct|
+            backend_struct.deinit(b.allocator);
+        b.allocator.free(backend_structs);
+    }
+
+    var dir_stack: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (dir_stack.items) |dir|
+            b.allocator.free(dir);
+        dir_stack.deinit(b.allocator);
+    }
+
+    var wf = b.addWriteFiles();
+    var it = try root_dir.walk(b.allocator);
+    defer it.deinit();
+
+    var last_it_stack_len: usize = 0;
+    while (try it.next()) |entry| : (last_it_stack_len = it.stack.items.len) {
+        var cur_dir = if (dir_stack.items.len > 0)
+            dir_stack.items[dir_stack.items.len - 1]
+        else
+            root_path;
+
+        if (entry.kind == .directory) {
+            for (backend_structs) |*content| {
+                try content.appendSlice(
+                    b.allocator,
+                    b.fmt("pub const {s} = struct {{\n", .{entry.basename}),
+                );
+            }
+
+            try dir_stack.append(b.allocator, b.pathJoin(&.{ cur_dir, entry.basename }));
+            continue;
+        }
+
+        if (it.stack.items.len < last_it_stack_len) {
+            for (backend_structs) |*content|
+                try content.appendSlice(b.allocator, "};\n");
+            b.allocator.free(cur_dir);
+            _ = dir_stack.pop();
+            cur_dir = if (dir_stack.items.len > 0)
+                dir_stack.items[dir_stack.items.len - 1]
+            else
+                root_path;
+        }
+
+        const shader_type: ShaderType = if (std.mem.startsWith(u8, entry.basename, "fs_"))
+            .fragment
+        else if (std.mem.startsWith(u8, entry.basename, "vs_"))
+            .vertex
+        else if (std.mem.startsWith(u8, entry.basename, "cs_"))
+            .compute
+        else
+            continue;
+
+        const stem = std.fs.path.stem(entry.basename);
+        for (backends, backend_structs) |backend, *content| {
+            const model = backend.shader_default_model;
+            const basename = b.fmt("{}_{s}_{s}", .{ dir_stack.items.len, @tagName(model), stem });
+            const name = b.fmt("{s}.bin", .{basename});
+            const input_path = b.pathJoin(&.{ cur_dir, entry.basename });
+            const compiled_shader = buildShaderInner(
+                b,
+                bi,
+                shaderc,
+                target,
+                b.path(input_path),
+                name,
+                shader_type,
+                model,
+            );
+
+            _ = wf.addCopyFile(compiled_shader, name);
+
+            try content.appendSlice(
+                b.allocator,
+                b.fmt(
+                    "const raw_{s} = @embedFile(\"{s}\");\npub const {s} = raw_{s}[0..];\n",
+                    .{ stem, name, stem, stem },
+                ),
+            );
+        }
+    }
+
+    for (dir_stack.items) |_| {
+        for (backend_structs) |*content|
+            try content.appendSlice(b.allocator, "};\n");
+    }
+
+    var module_content: std.ArrayListUnmanaged(u8) = .empty;
+    defer module_content.deinit(b.allocator);
+
+    for (backends, backend_structs) |backend, content| {
+        try module_content.appendSlice(
+            b.allocator,
+            b.fmt("pub const {s} = struct {{\n", .{backend.name}),
+        );
+        try module_content.appendSlice(b.allocator, content.items);
+        try module_content.appendSlice(b.allocator, "};\n");
+    }
+
+    return wf.add("shader_module.zig", module_content.items);
+}
+
+fn buildShaderInner(
+    b: *std.Build,
+    bi: BuildInfo,
+    shaderc: *std.Build.Step.Compile,
+    target: std.Target,
+    input: std.Build.LazyPath,
+    output_basename: []const u8,
+    shader_type: ShaderType,
+    shader_model: ShaderModel,
+) std.Build.LazyPath {
+    const shaderc_step = b.addRunArtifact(shaderc);
+    shaderc_step.addArg("-i");
+    shaderc_step.addDirectoryArg(bi.upstream_bgfx.path("src"));
+    shaderc_step.addArg("-f");
+    shaderc_step.addFileArg(input);
+    shaderc_step.addArg("-o");
+    const output = shaderc_step.addOutputFileArg(output_basename);
+
+    shaderc_step.addArgs(&.{
+        "--type",
+        @tagName(shader_type),
+        "--platform",
+        switch (target.os.tag) {
+            .linux => "linux",
+            .windows => "windows",
+            .macos => "osx",
+            else => |tag| {
+                std.debug.print("building shaders for target {s} is not supported\n", .{@tagName(tag)});
+                unreachable;
+            },
+        },
+        "--profile",
+        @tagName(shader_model),
+    });
+
+    return output;
+}
+
+pub const ShaderType = enum {
+    vertex,
+    fragment,
+    compute,
+};
+
+pub const ShaderModel = enum {
+    @"100_es",
+    @"300_es",
+    @"310_es",
+    @"320_es",
+    s_4_0,
+    s_5_0,
+    metal,
+    @"metal10-10",
+    @"metal11-10",
+    @"metal12-10",
+    @"metal20-11",
+    @"metal21-11",
+    @"metal22-11",
+    @"metal23-14",
+    @"metal24-14",
+    @"metal30-14",
+    @"metal31-14",
+    pssl,
+    spirv,
+    @"spirv10-10",
+    @"spirv13-11",
+    @"spirv14-11",
+    @"spirv15-12",
+    @"spirv16-13",
+    @"120",
+    @"130",
+    @"140",
+    @"150",
+    @"330",
+    @"400",
+    @"410",
+    @"420",
+    @"430",
+    @"440",
+};
+
+fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) !void {
     const lib = b.addLibrary(.{
         .name = "bgfx",
         .root_module = b.createModule(.{
@@ -49,9 +272,10 @@ fn buildBgfx(b: *std.Build, bi: BuildInfo) !void {
         },
     }
 
-    // macro definitions
-    for (bi.shaders) |shader_def| {
-        lib.root_module.addCMacro(shader_def.bgfx_config_macro, "1");
+    // enable backends
+    const backends = try getEnabledBackends(b, bi.target.result.os.tag);
+    for (backends) |backend| {
+        lib.root_module.addCMacro(backend.bgfx_config_macro, "1");
     }
 
     // include paths
@@ -96,12 +320,16 @@ fn buildBgfx(b: *std.Build, bi: BuildInfo) !void {
     lib.installHeadersDirectory(bi.upstream_bgfx.path("include"), "", .{});
 }
 
-fn buildShaderc(b: *std.Build, bi: BuildInfo) !void {
+fn buildShaderc(
+    b: *std.Build,
+    bi: BuildInfo,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = "shaderc",
         .root_module = b.createModule(.{
             .target = bi.target,
-            .optimize = bi.optimize,
+            .optimize = optimize,
         }),
     });
 
@@ -201,7 +429,7 @@ fn buildShaderc(b: *std.Build, bi: BuildInfo) !void {
     includeBx(bi, exe);
     exe.linkLibCpp();
 
-    b.installArtifact(exe);
+    return exe;
 }
 
 fn includeBx(bi: BuildInfo, comp: *std.Build.Step.Compile) void {
@@ -234,76 +462,75 @@ const BuildInfo = struct {
     upstream_bgfx: *std.Build.Dependency,
     upstream_bimg: *std.Build.Dependency,
     upstream_bx: *std.Build.Dependency,
-    shaders: []const Shader,
 };
 
-fn getEnabledShaders(b: *std.Build, tag: std.Target.Os.Tag) ![]const Shader {
-    var shader: std.ArrayListUnmanaged(Shader) = .empty;
+fn getEnabledBackends(b: *std.Build, tag: std.Target.Os.Tag) ![]const Backend {
+    var backends: std.ArrayListUnmanaged(Backend) = .empty;
 
-    // if shader options are set, only enable explicitly set shaders
+    // if backend options are present, only enable backends set from options
     var option_set = false;
-    for (shader_definitions) |shader_def| {
-        const shader_enabled = blk: {
-            if (b.option(bool, shader_def.name, shader_def.option_descr)) |enabled| {
+    for (backend_definitions) |backend| {
+        const enabled = blk: {
+            if (b.option(bool, backend.name, backend.option_descr)) |enabled| {
                 option_set = true;
                 break :blk enabled;
             } else break :blk false;
         };
 
-        if (shader_enabled)
-            try shader.append(b.allocator, shader_def);
+        if (enabled)
+            try backends.append(b.allocator, backend);
     }
 
-    // if no options set, enable all supported shaders
+    // if no options set, enable all supported backends
     if (!option_set) {
-        for (shader_definitions) |shader_def| {
-            for (shader_def.supported_platforms) |supported_tag| {
+        for (backend_definitions) |backend| {
+            for (backend.supported_platforms) |supported_tag| {
                 if (tag == supported_tag) {
-                    try shader.append(b.allocator, shader_def);
+                    try backends.append(b.allocator, backend);
                     break;
                 }
             }
         }
     }
 
-    return shader.items;
+    return backends.items;
 }
 
-const Shader = struct {
+const Backend = struct {
     name: []const u8,
     option_descr: []const u8,
     supported_platforms: []const std.Target.Os.Tag,
-    shaderc_name: []const u8,
+    shader_default_model: ShaderModel,
     bgfx_config_macro: []const u8,
 };
 
-const shader_definitions: []const Shader = &.{
+const backend_definitions: []const Backend = &.{
     .{
         .name = "opengl",
         .option_descr = "Enable OpenGL backend",
         .supported_platforms = &.{ .windows, .linux, .macos },
-        .shaderc_name = "120",
+        .shader_default_model = .@"120",
         .bgfx_config_macro = "BGFX_CONFIG_RENDERER_OPENGL",
     },
     .{
         .name = "vulkan",
         .option_descr = "Enable Vulkan backend",
         .supported_platforms = &.{ .windows, .linux },
-        .shaderc_name = "spirv",
+        .shader_default_model = .spirv,
         .bgfx_config_macro = "BGFX_CONFIG_RENDERER_VULKAN",
     },
     .{
         .name = "directx",
         .option_descr = "Enable DirectX 11 backend",
         .supported_platforms = &.{.windows},
-        .shaderc_name = "s_5_0",
+        .shader_default_model = .s_5_0,
         .bgfx_config_macro = "BGFX_CONFIG_RENDERER_DIRECT3D11",
     },
     .{
         .name = "metal",
         .option_descr = "Enable Metal backend",
         .supported_platforms = &.{.macos},
-        .shaderc_name = "metal",
+        .shader_default_model = .metal,
         .bgfx_config_macro = "BGFX_CONFIG_RENDERER_METAL",
     },
 };
