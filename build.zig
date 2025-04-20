@@ -169,7 +169,7 @@ pub fn createShaderModule(
     for (dir_stack.items) |_| {
         for (backend_structs) |*content|
             try content.appendSlice(b.allocator, "},\n");
-        try mod_backend_type.appendSlice(b.allocator, "};\n");
+        try mod_backend_type.appendSlice(b.allocator, "},\n");
     }
 
     try mod_backend_type.appendSlice(b.allocator, "};\n");
@@ -292,7 +292,9 @@ fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) !void {
             lib.linkSystemLibrary("opengl32");
             lib.linkSystemLibrary("gdi32");
         },
-        .macos => {},
+        .macos => {
+            lib.linkFramework("QuartzCore");
+        },
         else => {
             std.debug.print("warning: unsupported os {s}, no system library linked", .{@tagName(tag)});
         },
@@ -542,7 +544,7 @@ const backend_definitions: []const BackendDef = &.{
     .{
         .name = "opengl",
         .option_descr = "Enable OpenGL backend",
-        .supported_platforms = &.{ .windows, .linux, .macos },
+        .supported_platforms = &.{ .windows, .linux },
         .shader_default_model = .@"120",
         .bgfx_config_macro = "BGFX_CONFIG_RENDERER_OPENGL",
     },
