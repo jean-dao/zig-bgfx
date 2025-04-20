@@ -50,12 +50,19 @@ pub fn createShaderModule(
     };
     const shaderc = buildShaderc(b, bi, .Debug);
 
-    const backends = try getEnabledBackends(b, target.os.tag);
+    const backends = try getBackends(b, target.os.tag);
 
     var root_dir = b.build_root.handle.openDir(root_path, .{ .iterate = true }) catch |err| {
         std.debug.panic("unable to open '{s}' directory: {s}", .{ root_path, @errorName(err) });
     };
     defer root_dir.close();
+
+    var file_decls: std.ArrayListUnmanaged(u8) = .empty;
+    defer file_decls.deinit(b.allocator);
+
+    var mod_backend_type: std.ArrayListUnmanaged(u8) = .empty;
+    defer mod_backend_type.deinit(b.allocator);
+    try mod_backend_type.appendSlice(b.allocator, "const ShaderCollection = struct {\n");
 
     const backend_structs: []std.ArrayListUnmanaged(u8) =
         try b.allocator.alloc(std.ArrayListUnmanaged(u8), backends.len);
@@ -89,9 +96,14 @@ pub fn createShaderModule(
             for (backend_structs) |*content| {
                 try content.appendSlice(
                     b.allocator,
-                    b.fmt("pub const {s} = struct {{\n", .{entry.basename}),
+                    b.fmt(".{s} = .{{\n", .{entry.basename}),
                 );
             }
+
+            try mod_backend_type.appendSlice(
+                b.allocator,
+                b.fmt("{s}: struct {{\n", .{entry.basename}),
+            );
 
             try dir_stack.append(b.allocator, b.pathJoin(&.{ cur_dir, entry.basename }));
             continue;
@@ -99,7 +111,8 @@ pub fn createShaderModule(
 
         if (it.stack.items.len < last_it_stack_len) {
             for (backend_structs) |*content|
-                try content.appendSlice(b.allocator, "};\n");
+                try content.appendSlice(b.allocator, "},\n");
+            try mod_backend_type.appendSlice(b.allocator, "},");
             b.allocator.free(cur_dir);
             _ = dir_stack.pop();
             cur_dir = if (dir_stack.items.len > 0)
@@ -119,6 +132,9 @@ pub fn createShaderModule(
 
         const stem = std.fs.path.stem(entry.basename);
         for (backends, backend_structs) |backend, *content| {
+            if (!backend.enabled)
+                continue;
+
             const model = backend.shader_default_model;
             const basename = b.fmt("{}_{s}_{s}", .{ dir_stack.items.len, @tagName(model), stem });
             const name = b.fmt("{s}.bin", .{basename});
@@ -136,28 +152,38 @@ pub fn createShaderModule(
 
             _ = wf.addCopyFile(compiled_shader, name);
 
+            try file_decls.appendSlice(
+                b.allocator,
+                b.fmt("const raw_{s} = @embedFile(\"{s}\");\n", .{ basename, name }),
+            );
+
             try content.appendSlice(
                 b.allocator,
-                b.fmt(
-                    "const raw_{s} = @embedFile(\"{s}\");\npub const {s} = raw_{s}[0..];\n",
-                    .{ stem, name, stem, stem },
-                ),
+                b.fmt(".{s} = raw_{s}[0..],\n", .{ stem, basename }),
             );
         }
+
+        try mod_backend_type.appendSlice(b.allocator, b.fmt("{s}: []const u8 = &.{{}},\n", .{stem}));
     }
 
     for (dir_stack.items) |_| {
         for (backend_structs) |*content|
-            try content.appendSlice(b.allocator, "};\n");
+            try content.appendSlice(b.allocator, "},\n");
+        try mod_backend_type.appendSlice(b.allocator, "};\n");
     }
+
+    try mod_backend_type.appendSlice(b.allocator, "};\n");
 
     var module_content: std.ArrayListUnmanaged(u8) = .empty;
     defer module_content.deinit(b.allocator);
 
+    try module_content.appendSlice(b.allocator, file_decls.items);
+    try module_content.appendSlice(b.allocator, mod_backend_type.items);
+
     for (backends, backend_structs) |backend, content| {
         try module_content.appendSlice(
             b.allocator,
-            b.fmt("pub const {s} = struct {{\n", .{backend.name}),
+            b.fmt("pub const {s}: ShaderCollection = .{{\n", .{backend.name}),
         );
         try module_content.appendSlice(b.allocator, content.items);
         try module_content.appendSlice(b.allocator, "};\n");
@@ -273,9 +299,10 @@ fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) !void {
     }
 
     // enable backends
-    const backends = try getEnabledBackends(b, bi.target.result.os.tag);
+    const backends = try getBackends(b, bi.target.result.os.tag);
     for (backends) |backend| {
-        lib.root_module.addCMacro(backend.bgfx_config_macro, "1");
+        if (backend.enabled)
+            lib.root_module.addCMacro(backend.bgfx_config_macro, "1");
     }
 
     // include paths
@@ -464,39 +491,46 @@ const BuildInfo = struct {
     upstream_bx: *std.Build.Dependency,
 };
 
-fn getEnabledBackends(b: *std.Build, tag: std.Target.Os.Tag) ![]const Backend {
+fn getBackends(b: *std.Build, tag: std.Target.Os.Tag) ![]const Backend {
     var backends: std.ArrayListUnmanaged(Backend) = .empty;
-
-    // if backend options are present, only enable backends set from options
-    var option_set = false;
-    for (backend_definitions) |backend| {
+    for (backend_definitions) |def| {
         const enabled = blk: {
-            if (b.option(bool, backend.name, backend.option_descr)) |enabled| {
-                option_set = true;
+            if (b.option(bool, def.name, def.option_descr)) |enabled| {
                 break :blk enabled;
-            } else break :blk false;
+            } else {
+                for (def.supported_platforms) |supported_tag| {
+                    if (tag == supported_tag) {
+                        break :blk true;
+                    }
+                }
+
+                break :blk false;
+            }
         };
 
-        if (enabled)
-            try backends.append(b.allocator, backend);
-    }
-
-    // if no options set, enable all supported backends
-    if (!option_set) {
-        for (backend_definitions) |backend| {
-            for (backend.supported_platforms) |supported_tag| {
-                if (tag == supported_tag) {
-                    try backends.append(b.allocator, backend);
-                    break;
-                }
-            }
-        }
+        try backends.append(b.allocator, Backend.init(enabled, def));
     }
 
     return backends.items;
 }
 
 const Backend = struct {
+    enabled: bool,
+    name: []const u8,
+    shader_default_model: ShaderModel,
+    bgfx_config_macro: []const u8,
+
+    fn init(enabled: bool, def: BackendDef) Backend {
+        return .{
+            .enabled = enabled,
+            .name = def.name,
+            .shader_default_model = def.shader_default_model,
+            .bgfx_config_macro = def.bgfx_config_macro,
+        };
+    }
+};
+
+const BackendDef = struct {
     name: []const u8,
     option_descr: []const u8,
     supported_platforms: []const std.Target.Os.Tag,
@@ -504,7 +538,7 @@ const Backend = struct {
     bgfx_config_macro: []const u8,
 };
 
-const backend_definitions: []const Backend = &.{
+const backend_definitions: []const BackendDef = &.{
     .{
         .name = "opengl",
         .option_descr = "Enable OpenGL backend",
