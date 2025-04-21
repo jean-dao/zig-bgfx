@@ -1,17 +1,13 @@
-pub fn main() !void {
+pub fn main() void {
     const width = 800;
     const height = 600;
 
-    const window = c.SDL_CreateWindow(
-        "sdl-bgfx-example",
-        c.SDL_WINDOWPOS_UNDEFINED,
-        c.SDL_WINDOWPOS_UNDEFINED,
-        width,
-        height,
-        c.SDL_WINDOW_SHOWN,
-    ) orelse {
-        std.debug.print("failed to create SDL window\n", .{});
-        return error.SdlCreateWindow;
+    if (!c.SDL_Init(c.SDL_INIT_VIDEO))
+        sdlError("failed to initialize SDL");
+    defer c.SDL_Quit();
+
+    const window = c.SDL_CreateWindow("sdl-bgfx-example", width, height, 0) orelse {
+        sdlError("failed to create SDL window");
     };
     defer c.SDL_DestroyWindow(window);
 
@@ -31,60 +27,14 @@ pub fn main() !void {
     bgfx_init.limits.transientVbSize = 6 << 20;
     bgfx_init.limits.transientIbSize = 2 << 20;
 
-    // platform dependent WM setup
-    var wmi = std.mem.zeroes(c.SDL_SysWMinfo);
-    wmi.version.major = c.SDL_MAJOR_VERSION;
-    wmi.version.minor = c.SDL_MINOR_VERSION;
-    wmi.version.patch = c.SDL_PATCHLEVEL;
-
-    if (c.SDL_GetWindowWMInfo(window, &wmi) == c.SDL_FALSE) {
-        std.debug.print("failed to get SDL window WM info\n", .{});
-        return error.SdlGetWindowWmInfo;
-    }
-
-    switch (builtin.os.tag) {
-        .linux => switch (wmi.subsystem) {
-            c.SDL_SYSWM_X11 => {
-                bgfx_init.platformData.type = c.BGFX_NATIVE_WINDOW_HANDLE_TYPE_DEFAULT;
-                bgfx_init.platformData.ndt = wmi.info.x11.display;
-                bgfx_init.platformData.nwh = @ptrFromInt(wmi.info.x11.window);
-            },
-            c.SDL_SYSWM_WAYLAND => {
-                bgfx_init.platformData.type = c.BGFX_NATIVE_WINDOW_HANDLE_TYPE_WAYLAND;
-                bgfx_init.platformData.ndt = wmi.info.wl.display;
-                bgfx_init.platformData.nwh = wmi.info.wl.surface;
-            },
-            else => {
-                std.debug.print(
-                    "unsupported windowing subsystem (SDL_SYSWM_TYPE={})\n",
-                    .{wmi.subsystem},
-                );
-                return error.UnsupportedPlatform;
-            },
-        },
-        .windows => {
-            bgfx_init.platformData.nwh = wmi.info.win.window;
-            bgfx_init.platformData.ndt = null;
-        },
-        .macos => {
-            bgfx_init.platformData.nwh = wmi.info.cocoa.window;
-            bgfx_init.platformData.ndt = null;
-        },
-        else => {
-            std.debug.print("unsupported os: {s}\n", .{@tagName(builtin.os.tag)});
-            return error.UnsupportedPlatform;
-        },
-    }
-
+    bgfx_init.platformData = getPlatformData(window);
     c.bgfx_set_platform_data(&bgfx_init.platformData);
 
     // macos needs this
     _ = c.bgfx_render_frame(-1);
 
-    if (!c.bgfx_init(&bgfx_init)) {
-        std.debug.print("failed to initialize bgfx\n", .{});
-        return error.BgfxInit;
-    }
+    if (!c.bgfx_init(&bgfx_init))
+        std.debug.panic("failed to initialize bgfx\n", .{});
     defer c.bgfx_shutdown();
 
     std.debug.print("using {s} renderer\n", .{c.bgfx_get_renderer_name(c.bgfx_get_renderer_type())});
@@ -98,11 +48,11 @@ pub fn main() !void {
     var running = true;
     while (running) {
         var event: c.SDL_Event = undefined;
-        while (c.SDL_PollEvent(&event) != 0) {
+        while (c.SDL_PollEvent(&event)) {
             switch (event.type) {
-                c.SDL_QUIT => running = false,
-                c.SDL_KEYDOWN => switch (event.key.keysym.sym) {
-                    c.SDLK_q, c.SDLK_ESCAPE => running = false,
+                c.SDL_EVENT_QUIT => running = false,
+                c.SDL_EVENT_KEY_DOWN => switch (event.key.key) {
+                    c.SDLK_Q, c.SDLK_ESCAPE => running = false,
                     else => {},
                 },
                 else => {},
@@ -117,9 +67,67 @@ pub fn main() !void {
     }
 }
 
+fn getPlatformData(window: *c.SDL_Window) c.bgfx_platform_data_t {
+    var data = std.mem.zeroes(c.bgfx_platform_data_t);
+
+    switch (builtin.os.tag) {
+        .linux => {
+            const video_driver = std.mem.span(c.SDL_GetCurrentVideoDriver() orelse {
+                sdlError("failed to get SDL video driver");
+            });
+
+            if (std.mem.eql(u8, video_driver, "x11")) {
+                data.type = c.BGFX_NATIVE_WINDOW_HANDLE_TYPE_DEFAULT;
+                data.ndt = getWindowPtrProp(window, c.SDL_PROP_WINDOW_X11_DISPLAY_POINTER);
+                data.nwh = getWindowIntProp(window, c.SDL_PROP_WINDOW_X11_WINDOW_NUMBER);
+            } else if (std.mem.eql(u8, video_driver, "wayland")) {
+                data.type = c.BGFX_NATIVE_WINDOW_HANDLE_TYPE_WAYLAND;
+                data.ndt = getWindowPtrProp(window, c.SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER);
+                data.nwh = getWindowPtrProp(window, c.SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER);
+            } else {
+                std.debug.panic("unsupported window driver: {s}\n", .{video_driver});
+            }
+        },
+        .windows => {
+            data.nwh = getWindowPtrProp(window, c.SDL_PROP_WINDOW_WIN32_HWND_POINTER);
+        },
+        .macos => {
+            data.nwh = getWindowPtrProp(window, c.SDL_PROP_WINDOW_COCOA_WINDOW_POINTER);
+        },
+        else => {
+            std.debug.panic("unsupported os: {s}\n", .{@tagName(builtin.os.tag)});
+        },
+    }
+
+    return data;
+}
+
+fn getWindowPtrProp(window: *c.SDL_Window, prop: [:0]const u8) *anyopaque {
+    const properties = c.SDL_GetWindowProperties(window);
+    if (properties == 0)
+        sdlError("failed to get SDL window properties");
+
+    return c.SDL_GetPointerProperty(properties, prop, null) orelse {
+        std.debug.panic("failed to get SDL window property '{s}'", .{prop});
+    };
+}
+
+fn getWindowIntProp(window: *c.SDL_Window, prop: [:0]const u8) *anyopaque {
+    const properties = c.SDL_GetWindowProperties(window);
+    if (properties == 0)
+        sdlError("failed to get SDL window properties");
+
+    // No idea if 0 is a valid property
+    return @ptrFromInt(@as(usize, @intCast(c.SDL_GetNumberProperty(properties, prop, 0))));
+}
+
+fn sdlError(msg: []const u8) noreturn {
+    std.debug.print("{s}: {s}\n", .{ msg, c.SDL_GetError() });
+    std.process.exit(1);
+}
+
 const c = @cImport({
-    @cInclude("SDL2/SDL.h");
-    @cInclude("SDL2/SDL_syswm.h");
+    @cInclude("SDL3/SDL.h");
     @cInclude("bgfx/c99/bgfx.h");
 });
 const builtin = @import("builtin");
