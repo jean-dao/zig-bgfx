@@ -8,8 +8,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const sdl = b.dependency("SDL", .{});
-    exe.linkLibrary(sdl.artifact("SDL2"));
+    if (target.result.os.tag != .linux) {
+        const sdl = b.dependency("SDL", .{});
+        exe.linkLibrary(sdl.artifact("SDL2"));
+    } else {
+        // allyourcodebase/SDL doesn't support Wayland
+        exe.linkSystemLibrary("SDL2");
+    }
 
     const bgfx = b.dependency("zig_bgfx", .{});
     exe.linkLibrary(bgfx.artifact("bgfx"));

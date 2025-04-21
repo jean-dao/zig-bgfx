@@ -45,12 +45,14 @@ pub fn main() !void {
     switch (builtin.os.tag) {
         .linux => switch (wmi.subsystem) {
             c.SDL_SYSWM_X11 => {
+                bgfx_init.platformData.type = c.BGFX_NATIVE_WINDOW_HANDLE_TYPE_DEFAULT;
                 bgfx_init.platformData.ndt = wmi.info.x11.display;
                 bgfx_init.platformData.nwh = @ptrFromInt(wmi.info.x11.window);
             },
             c.SDL_SYSWM_WAYLAND => {
-                std.debug.print("Wayland not supported\n", .{});
-                return error.UnsupportedPlatform;
+                bgfx_init.platformData.type = c.BGFX_NATIVE_WINDOW_HANDLE_TYPE_WAYLAND;
+                bgfx_init.platformData.ndt = wmi.info.wl.display;
+                bgfx_init.platformData.nwh = wmi.info.wl.surface;
             },
             else => {
                 std.debug.print(
