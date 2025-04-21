@@ -8,17 +8,12 @@ pub fn main() !void {
         c.SDL_WINDOWPOS_UNDEFINED,
         width,
         height,
-        c.SDL_WINDOW_SHOWN | c.SDL_WINDOW_RESIZABLE,
+        c.SDL_WINDOW_SHOWN,
     ) orelse {
         std.debug.print("failed to create SDL window\n", .{});
         return error.SdlCreateWindow;
     };
     defer c.SDL_DestroyWindow(window);
-
-    var wmi: c.SDL_SysWMinfo = undefined;
-    wmi.version.major = c.SDL_MAJOR_VERSION;
-    wmi.version.minor = c.SDL_MINOR_VERSION;
-    wmi.version.patch = c.SDL_PATCHLEVEL;
 
     // make sure to properly populate `bgfx_init_t` struct
     // see `Init::Init()` and `Init::Limits::Limits()` in BGFX `src/bgfx.cpp` file
@@ -37,6 +32,11 @@ pub fn main() !void {
     bgfx_init.limits.transientIbSize = 2 << 20;
 
     // platform dependent WM setup
+    var wmi = std.mem.zeroes(c.SDL_SysWMinfo);
+    wmi.version.major = c.SDL_MAJOR_VERSION;
+    wmi.version.minor = c.SDL_MINOR_VERSION;
+    wmi.version.patch = c.SDL_PATCHLEVEL;
+
     if (c.SDL_GetWindowWMInfo(window, &wmi) == c.SDL_FALSE) {
         std.debug.print("failed to get SDL window WM info\n", .{});
         return error.SdlGetWindowWmInfo;
@@ -64,6 +64,7 @@ pub fn main() !void {
         },
         .windows => {
             bgfx_init.platformData.nwh = wmi.info.win.window;
+            bgfx_init.platformData.ndt = null;
         },
         .macos => {
             bgfx_init.platformData.nwh = wmi.info.cocoa.window;
