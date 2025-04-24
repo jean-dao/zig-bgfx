@@ -1,234 +1,22 @@
-pub fn build(b: *std.Build) !void {
-    const bi: BuildInfo = .{
-        .target = b.standardTargetOptions(.{}),
-        .optimize = b.standardOptimizeOption(.{}),
-        .upstream_bgfx = b.dependency("bgfx", .{}),
-        .upstream_bimg = b.dependency("bimg", .{}),
-        .upstream_bx = b.dependency("bx", .{}),
-    };
-
-    if (b.option(bool, "bgfx", "Build BGFX library") orelse true)
-        try buildInstallBgfx(b, bi);
-
-    if (b.option(bool, "shaderc", "Build shaderc") orelse false) {
-        const shaderc = buildShaderc(b, bi, bi.optimize);
-        b.installArtifact(shaderc);
-    }
-}
-
-pub fn buildShader(
-    b: *std.Build,
+pub const ShaderOption = struct {
     target: std.Target,
-    input: std.Build.LazyPath,
-    shader_type: ShaderType,
-    shader_model: ShaderModel,
-) std.Build.LazyPath {
-    const zig_bgfx = b.dependencyFromBuildZig(@This(), .{});
-    const bi: BuildInfo = .{
-        .target = b.resolveTargetQuery(.{}),
-        .optimize = .Debug,
-        .upstream_bgfx = zig_bgfx.builder.dependency("bgfx", .{}),
-        .upstream_bimg = zig_bgfx.builder.dependency("bimg", .{}),
-        .upstream_bx = zig_bgfx.builder.dependency("bx", .{}),
-    };
-    const shaderc = buildShaderc(b, bi, .Debug);
-    return buildShaderInner(b, bi, shaderc, target, input, "shader.bin", shader_type, shader_model);
-}
+    path: std.Build.LazyPath,
+    type: ShaderType,
+    model: ShaderModel,
+};
 
-pub fn createShaderModule(
-    b: *std.Build,
+pub const ShaderDirOption = struct {
     target: std.Target,
     root_path: []const u8,
-) !std.Build.LazyPath {
-    const zig_bgfx = b.dependencyFromBuildZig(@This(), .{});
-    const bi: BuildInfo = .{
-        .target = b.resolveTargetQuery(.{}),
-        .optimize = .Debug,
-        .upstream_bgfx = zig_bgfx.builder.dependency("bgfx", .{}),
-        .upstream_bimg = zig_bgfx.builder.dependency("bimg", .{}),
-        .upstream_bx = zig_bgfx.builder.dependency("bx", .{}),
-    };
-    const shaderc = buildShaderc(b, bi, .Debug);
+    backends: BackendConfig = .{},
+};
 
-    const backends = try getBackends(b, target.os.tag);
-
-    var root_dir = b.build_root.handle.openDir(root_path, .{ .iterate = true }) catch |err| {
-        std.debug.panic("unable to open '{s}' directory: {s}", .{ root_path, @errorName(err) });
-    };
-    defer root_dir.close();
-
-    var file_decls: std.ArrayListUnmanaged(u8) = .empty;
-    defer file_decls.deinit(b.allocator);
-
-    var mod_backend_type: std.ArrayListUnmanaged(u8) = .empty;
-    defer mod_backend_type.deinit(b.allocator);
-    try mod_backend_type.appendSlice(b.allocator, "const ShaderCollection = struct {\n");
-
-    const backend_structs: []std.ArrayListUnmanaged(u8) =
-        try b.allocator.alloc(std.ArrayListUnmanaged(u8), backends.len);
-    for (backend_structs) |*backend_struct|
-        backend_struct.* = .empty;
-    defer {
-        for (backend_structs) |*backend_struct|
-            backend_struct.deinit(b.allocator);
-        b.allocator.free(backend_structs);
-    }
-
-    var dir_stack: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        for (dir_stack.items) |dir|
-            b.allocator.free(dir);
-        dir_stack.deinit(b.allocator);
-    }
-
-    var wf = b.addWriteFiles();
-    var it = try root_dir.walk(b.allocator);
-    defer it.deinit();
-
-    var last_it_stack_len: usize = 0;
-    while (try it.next()) |entry| : (last_it_stack_len = it.stack.items.len) {
-        var cur_dir = if (dir_stack.items.len > 0)
-            dir_stack.items[dir_stack.items.len - 1]
-        else
-            root_path;
-
-        if (entry.kind == .directory) {
-            for (backend_structs) |*content| {
-                try content.appendSlice(
-                    b.allocator,
-                    b.fmt(".{s} = .{{\n", .{entry.basename}),
-                );
-            }
-
-            try mod_backend_type.appendSlice(
-                b.allocator,
-                b.fmt("{s}: struct {{\n", .{entry.basename}),
-            );
-
-            try dir_stack.append(b.allocator, b.pathJoin(&.{ cur_dir, entry.basename }));
-            continue;
-        }
-
-        if (it.stack.items.len < last_it_stack_len) {
-            for (backend_structs) |*content|
-                try content.appendSlice(b.allocator, "},\n");
-            try mod_backend_type.appendSlice(b.allocator, "},");
-            b.allocator.free(cur_dir);
-            _ = dir_stack.pop();
-            cur_dir = if (dir_stack.items.len > 0)
-                dir_stack.items[dir_stack.items.len - 1]
-            else
-                root_path;
-        }
-
-        const shader_type: ShaderType = if (std.mem.startsWith(u8, entry.basename, "fs_"))
-            .fragment
-        else if (std.mem.startsWith(u8, entry.basename, "vs_"))
-            .vertex
-        else if (std.mem.startsWith(u8, entry.basename, "cs_"))
-            .compute
-        else
-            continue;
-
-        const stem = std.fs.path.stem(entry.basename);
-        for (backends, backend_structs) |backend, *content| {
-            if (!backend.enabled)
-                continue;
-
-            const model = backend.shader_default_model;
-            const basename = b.fmt("{}_{s}_{s}", .{ dir_stack.items.len, @tagName(model), stem });
-            const name = b.fmt("{s}.bin", .{basename});
-            const input_path = b.pathJoin(&.{ cur_dir, entry.basename });
-            const compiled_shader = buildShaderInner(
-                b,
-                bi,
-                shaderc,
-                target,
-                b.path(input_path),
-                name,
-                shader_type,
-                model,
-            );
-
-            _ = wf.addCopyFile(compiled_shader, name);
-
-            try file_decls.appendSlice(
-                b.allocator,
-                b.fmt("const raw_{s} = @embedFile(\"{s}\");\n", .{ basename, name }),
-            );
-
-            try content.appendSlice(
-                b.allocator,
-                b.fmt(".{s} = raw_{s}[0..],\n", .{ stem, basename }),
-            );
-        }
-
-        try mod_backend_type.appendSlice(b.allocator, b.fmt("{s}: []const u8 = &.{{}},\n", .{stem}));
-    }
-
-    for (dir_stack.items) |_| {
-        for (backend_structs) |*content|
-            try content.appendSlice(b.allocator, "},\n");
-        try mod_backend_type.appendSlice(b.allocator, "},\n");
-    }
-
-    try mod_backend_type.appendSlice(b.allocator, "};\n");
-
-    var module_content: std.ArrayListUnmanaged(u8) = .empty;
-    defer module_content.deinit(b.allocator);
-
-    try module_content.appendSlice(b.allocator, file_decls.items);
-    try module_content.appendSlice(b.allocator, mod_backend_type.items);
-
-    for (backends, backend_structs) |backend, content| {
-        try module_content.appendSlice(
-            b.allocator,
-            b.fmt("pub const {s}: ShaderCollection = .{{\n", .{backend.name}),
-        );
-        try module_content.appendSlice(b.allocator, content.items);
-        try module_content.appendSlice(b.allocator, "};\n");
-    }
-
-    return wf.add("shader_module.zig", module_content.items);
-}
-
-fn buildShaderInner(
-    b: *std.Build,
-    bi: BuildInfo,
-    shaderc: *std.Build.Step.Compile,
-    target: std.Target,
-    input: std.Build.LazyPath,
-    output_basename: []const u8,
-    shader_type: ShaderType,
-    shader_model: ShaderModel,
-) std.Build.LazyPath {
-    const shaderc_step = b.addRunArtifact(shaderc);
-    shaderc_step.addArg("-i");
-    shaderc_step.addDirectoryArg(bi.upstream_bgfx.path("src"));
-    shaderc_step.addArg("-f");
-    shaderc_step.addFileArg(input);
-    shaderc_step.addArg("-o");
-    const output = shaderc_step.addOutputFileArg(output_basename);
-
-    shaderc_step.addArgs(&.{
-        "--type",
-        @tagName(shader_type),
-        "--platform",
-        switch (target.os.tag) {
-            .linux => "linux",
-            .windows => "windows",
-            .macos => "osx",
-            else => |tag| {
-                std.debug.print("building shaders for target {s} is not supported\n", .{@tagName(tag)});
-                unreachable;
-            },
-        },
-        "--profile",
-        @tagName(shader_model),
-    });
-
-    return output;
-}
+pub const BackendConfig = struct {
+    opengl: ?bool = null,
+    vulkan: ?bool = null,
+    directx: ?bool = null,
+    metal: ?bool = null,
+};
 
 pub const ShaderType = enum {
     vertex,
@@ -273,7 +61,416 @@ pub const ShaderModel = enum {
     @"440",
 };
 
-fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) !void {
+pub fn build(b: *std.Build) void {
+    const bi: BuildInfo = .{
+        .target = b.standardTargetOptions(.{}),
+        .optimize = b.standardOptimizeOption(.{}),
+        .upstream_bgfx = b.dependency("bgfx", .{}),
+        .upstream_bimg = b.dependency("bimg", .{}),
+        .upstream_bx = b.dependency("bx", .{}),
+        .backend_config = blk: {
+            var bc: BackendConfig = .{};
+            inline for (backend_definitions) |def| {
+                if (b.option(bool, def.name, def.option_descr)) |enabled|
+                    @field(bc, def.name) = enabled;
+            }
+            break :blk bc;
+        },
+    };
+
+    if (b.option(bool, "bgfx", "Build BGFX library") orelse true)
+        buildInstallBgfx(b, bi);
+
+    if (b.option(bool, "shaderc", "Build shaderc") orelse false)
+        buildInstallShaderc(b, bi);
+}
+
+pub fn buildShader(
+    b: *std.Build,
+    opts: ShaderOption,
+) std.Build.LazyPath {
+    const zig_bgfx = b.dependencyFromBuildZig(@This(), .{
+        // use native target to build shaderc
+        .target = b.resolveTargetQuery(.{}),
+        .optimize = .Debug,
+        .bgfx = false,
+        .shaderc = true,
+    });
+    const shaderc = zig_bgfx.artifact("shaderc");
+    return buildShaderInner(
+        b,
+        shaderc,
+        zig_bgfx.builder.dependency("bgfx", .{}),
+        opts.target,
+        opts.path,
+        "shader.bin",
+        opts.type,
+        opts.model,
+    );
+}
+
+pub fn buildShaderDir(
+    b: *std.Build,
+    opts: ShaderDirOption,
+) !*std.Build.Step.WriteFile {
+    const zig_bgfx = b.dependencyFromBuildZig(@This(), .{
+        // use native target to build shaderc
+        .target = b.resolveTargetQuery(.{}),
+        .optimize = .Debug,
+        .bgfx = false,
+        .shaderc = true,
+    });
+    const upstream_bgfx = zig_bgfx.builder.dependency("bgfx", .{});
+    const shaderc = zig_bgfx.artifact("shaderc");
+    const backends = try getEnabledBackends(
+        b.allocator,
+        opts.target.os.tag,
+        opts.backends,
+    );
+
+    var root_dir = b.build_root.handle.openDir(opts.root_path, .{ .iterate = true }) catch |err| {
+        std.debug.panic(
+            "unable to open '{s}' directory: {s}",
+            .{ opts.root_path, @errorName(err) },
+        );
+    };
+    defer root_dir.close();
+
+    var wf = b.addWriteFiles();
+    var it = try root_dir.walk(b.allocator);
+    defer it.deinit();
+
+    const extension = ".sc";
+    while (try it.next()) |entry| {
+        if (entry.kind == .directory)
+            continue;
+
+        if (!std.mem.endsWith(u8, entry.basename, extension))
+            continue;
+
+        const shader_type: ShaderType = if (std.mem.startsWith(u8, entry.basename, "fs_"))
+            .fragment
+        else if (std.mem.startsWith(u8, entry.basename, "vs_"))
+            .vertex
+        else if (std.mem.startsWith(u8, entry.basename, "cs_"))
+            .compute
+        else
+            continue;
+
+        const rel_dir_path = std.fs.path.dirname(entry.path);
+        const input_path = b.pathJoin(&.{ opts.root_path, entry.path });
+        const stem = entry.basename[0 .. entry.basename.len - extension.len];
+        const basename = b.fmt("{s}.bin", .{stem});
+        for (backends) |backend| {
+            if (!backend.enabled)
+                continue;
+
+            // output compiled shader in backend specific directory
+            const rel_output_path = if (rel_dir_path) |p|
+                b.pathJoin(&.{ backend.name, p, basename })
+            else
+                b.pathJoin(&.{ backend.name, basename });
+
+            const compiled_shader = buildShaderInner(
+                b,
+                shaderc,
+                upstream_bgfx,
+                opts.target,
+                b.path(input_path),
+                rel_output_path,
+                shader_type,
+                backend.shader_default_model,
+            );
+
+            _ = wf.addCopyFile(compiled_shader, rel_output_path);
+        }
+    }
+
+    return wf;
+}
+
+pub fn createShaderModule(
+    b: *std.Build,
+    input_wf: *std.Build.Step.WriteFile,
+) !std.Build.LazyPath {
+    var backend: ModuleBuilder = .{};
+    defer backend.deinit(b.allocator);
+
+    const wf = b.addWriteFiles();
+    for (input_wf.files.items) |file| {
+        const lazy_path: std.Build.LazyPath = .{
+            .generated = .{
+                .file = &input_wf.generated_directory,
+                .sub_path = file.sub_path,
+            },
+        };
+        _ = wf.addCopyFile(lazy_path, file.sub_path);
+    }
+
+    for (wf.files.items) |file| {
+        try backend.add(b.allocator, file.sub_path);
+    }
+
+    const content = try backend.genContent(b.allocator, wf);
+    defer b.allocator.free(content);
+
+    return wf.add("shader_module.zig", content);
+}
+
+const ModuleBuilder = struct {
+    backends: std.StringHashMapUnmanaged(void) = .empty,
+    toplevels: std.StringHashMapUnmanaged(void) = .empty,
+    decls: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(void)) = .empty,
+
+    const Gen = struct {
+        embedded_decls: std.StringHashMapUnmanaged([]const u8),
+        backend_type: std.ArrayListUnmanaged(u8),
+        backend_decls: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(u8)),
+        content: std.ArrayListUnmanaged(u8),
+
+        const empty: Gen = .{
+            .embedded_decls = .empty,
+            .backend_type = .empty,
+            .backend_decls = .empty,
+            .content = .empty,
+        };
+
+        fn genField(
+            self: *Gen,
+            allocator: std.mem.Allocator,
+            wf: *std.Build.Step.WriteFile,
+            field_defs: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(void)),
+            field: []const u8,
+            indent: []const u8,
+        ) !void {
+            const name = std.fs.path.stem(field);
+            try self.backend_type.appendSlice(allocator, indent);
+            try self.backend_type.appendSlice(allocator, name);
+            try self.backend_type.appendSlice(allocator, ": ");
+
+            if (field_defs.getPtr(field)) |children| {
+                try self.backend_type.appendSlice(allocator, "struct {\n");
+                {
+                    var backend_it = self.backend_decls.valueIterator();
+                    while (backend_it.next()) |backend_decl| {
+                        try backend_decl.appendSlice(allocator, indent);
+                        try backend_decl.append(allocator, '.');
+                        try backend_decl.appendSlice(allocator, name);
+                        try backend_decl.appendSlice(allocator, " = .{\n");
+                    }
+                }
+
+                const child_indent = try std.mem.concat(allocator, u8, &.{
+                    indent,
+                    "    ",
+                });
+                defer allocator.free(child_indent);
+
+                var children_it = children.keyIterator();
+                while (children_it.next()) |child_ptr| {
+                    try self.genField(
+                        allocator,
+                        wf,
+                        field_defs,
+                        child_ptr.*,
+                        child_indent,
+                    );
+                }
+
+                try self.backend_type.appendSlice(allocator, indent);
+                try self.backend_type.appendSlice(allocator, "} = .{},\n");
+                {
+                    var backend_it = self.backend_decls.valueIterator();
+                    while (backend_it.next()) |backend_decl| {
+                        try backend_decl.appendSlice(allocator, indent);
+                        try backend_decl.appendSlice(allocator, "},\n");
+                    }
+                }
+            } else {
+                try self.backend_type.appendSlice(allocator, "[]const u8 = &.{},\n");
+
+                var backend_it = self.backend_decls.iterator();
+                while (backend_it.next()) |kv| {
+                    const backend = kv.key_ptr.*;
+                    const path = try std.fs.path.join(allocator, &.{ backend, field });
+                    defer allocator.free(path);
+                    path_exists: {
+                        for (wf.files.items) |file| {
+                            if (std.mem.eql(u8, file.sub_path, path))
+                                break :path_exists;
+                        }
+
+                        continue;
+                    }
+
+                    const backend_decl = kv.value_ptr;
+                    try backend_decl.appendSlice(allocator, indent);
+                    try backend_decl.append(allocator, '.');
+                    try backend_decl.appendSlice(allocator, name);
+                    try backend_decl.appendSlice(allocator, " = @\"");
+                    try backend_decl.appendSlice(allocator, backend);
+                    try backend_decl.appendSlice(allocator, std.fs.path.sep_str);
+                    try backend_decl.appendSlice(allocator, field);
+                    try backend_decl.appendSlice(allocator, "\"[0..],\n");
+                }
+            }
+        }
+
+        fn deinit(self: *Gen, allocator: std.mem.Allocator) void {
+            {
+                var it = self.embedded_decls.valueIterator();
+                while (it.next()) |value_ptr| {
+                    allocator.free(value_ptr.*);
+                }
+            }
+
+            self.embedded_decls.deinit(allocator);
+            self.backend_type.deinit(allocator);
+
+            {
+                var it = self.backend_decls.valueIterator();
+                while (it.next()) |backend_decl| {
+                    backend_decl.deinit(allocator);
+                }
+                self.backend_decls.deinit(allocator);
+            }
+
+            self.content.deinit(allocator);
+        }
+    };
+
+    fn genContent(
+        self: *ModuleBuilder,
+        allocator: std.mem.Allocator,
+        wf: *std.Build.Step.WriteFile,
+    ) ![]const u8 {
+        var gen: Gen = .empty;
+        defer gen.deinit(allocator);
+
+        // embed shader file declarations
+        for (wf.files.items) |file| {
+            try gen.content.appendSlice(allocator, "const @\"");
+            try gen.content.appendSlice(allocator, file.sub_path);
+            try gen.content.appendSlice(allocator, "\" = @embedFile(\"");
+            try gen.content.appendSlice(allocator, file.sub_path);
+            try gen.content.appendSlice(allocator, "\");\n");
+        }
+
+        try gen.content.append(allocator, '\n');
+
+        for (backend_definitions) |backend| {
+            try gen.backend_decls.putNoClobber(allocator, backend.name, .empty);
+
+            const backend_decl = gen.backend_decls.getPtr(backend.name).?;
+            try backend_decl.appendSlice(allocator, "pub const ");
+            try backend_decl.appendSlice(allocator, backend.name);
+            try backend_decl.appendSlice(allocator, ": ShaderCollection = .{\n");
+        }
+
+        try gen.backend_type.appendSlice(allocator, "const ShaderCollection = struct {\n");
+
+        var toplevel_it = self.toplevels.keyIterator();
+        while (toplevel_it.next()) |toplevel_ptr| {
+            try gen.genField(allocator, wf, self.decls, toplevel_ptr.*, "    ");
+        }
+
+        try gen.content.appendSlice(allocator, gen.backend_type.items);
+        try gen.content.appendSlice(allocator, "};\n\n");
+
+        var backend_decl_it = gen.backend_decls.valueIterator();
+        while (backend_decl_it.next()) |backend_decl| {
+            try gen.content.appendSlice(allocator, backend_decl.items);
+            try gen.content.appendSlice(allocator, "};\n\n");
+        }
+
+        return try gen.content.toOwnedSlice(allocator);
+    }
+
+    fn add(self: *ModuleBuilder, allocator: std.mem.Allocator, path: []const u8) !void {
+        var it = try std.fs.path.componentIterator(path);
+        const backend = (it.first() orelse return).name;
+        if (!self.backends.contains(backend))
+            try self.backends.putNoClobber(allocator, backend, {});
+
+        std.debug.assert(std.mem.startsWith(u8, path, backend));
+        std.debug.assert(std.mem.eql(
+            u8,
+            path[backend.len..][0..std.fs.path.sep_str.len],
+            std.fs.path.sep_str,
+        ));
+
+        const subpath = path[backend.len + std.fs.path.sep_str.len ..];
+        try self.addDecls(allocator, subpath);
+    }
+
+    fn addDecls(
+        self: *ModuleBuilder,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+    ) !void {
+        if (std.fs.path.dirname(path)) |parent| {
+            const parent_gop = try self.decls.getOrPut(allocator, parent);
+            if (!parent_gop.found_existing)
+                parent_gop.value_ptr.* = .empty;
+            try parent_gop.value_ptr.put(allocator, path, {});
+            try self.addDecls(allocator, parent);
+        } else {
+            if (!self.toplevels.contains(path))
+                try self.toplevels.putNoClobber(allocator, path, {});
+        }
+    }
+
+    fn deinit(self: *ModuleBuilder, allocator: std.mem.Allocator) void {
+        self.backends.deinit(allocator);
+        self.toplevels.deinit(allocator);
+
+        var decl_it = self.decls.valueIterator();
+        while (decl_it.next()) |value_ptr| {
+            value_ptr.deinit(allocator);
+        }
+        self.decls.deinit(allocator);
+    }
+};
+
+fn buildShaderInner(
+    b: *std.Build,
+    shaderc: *std.Build.Step.Compile,
+    upstream_bgfx: *std.Build.Dependency,
+    target: std.Target,
+    input_path: std.Build.LazyPath,
+    output_path: []const u8,
+    shader_type: ShaderType,
+    shader_model: ShaderModel,
+) std.Build.LazyPath {
+    const shaderc_step = b.addRunArtifact(shaderc);
+    shaderc_step.addArg("-i");
+    shaderc_step.addDirectoryArg(upstream_bgfx.path("src"));
+    shaderc_step.addArg("-f");
+    shaderc_step.addFileArg(input_path);
+    shaderc_step.addArg("-o");
+    const output = shaderc_step.addOutputFileArg(output_path);
+
+    shaderc_step.addArgs(&.{
+        "--type",
+        @tagName(shader_type),
+        "--platform",
+        switch (target.os.tag) {
+            .linux => "linux",
+            .windows => "windows",
+            .macos => "osx",
+            else => |tag| {
+                std.debug.print("building shaders for target {s} is not supported\n", .{@tagName(tag)});
+                unreachable;
+            },
+        },
+        "--profile",
+        @tagName(shader_model),
+    });
+
+    return output;
+}
+
+fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) void {
     const lib = b.addLibrary(.{
         .name = "bgfx",
         .root_module = b.createModule(.{
@@ -282,7 +479,7 @@ fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) !void {
         }),
     });
 
-    const tag = lib.rootModuleTarget().os.tag;
+    const tag = bi.target.result.os.tag;
     switch (tag) {
         .linux => {
             lib.linkSystemLibrary("GL");
@@ -301,7 +498,7 @@ fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) !void {
     }
 
     // enable backends
-    const backends = try getBackends(b, bi.target.result.os.tag);
+    const backends = getEnabledBackends(b.allocator, tag, bi.backend_config) catch @panic("OOM");
     for (backends) |backend| {
         if (backend.enabled)
             lib.root_module.addCMacro(backend.bgfx_config_macro, "1");
@@ -349,16 +546,12 @@ fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) !void {
     lib.installHeadersDirectory(bi.upstream_bgfx.path("include"), "", .{});
 }
 
-fn buildShaderc(
-    b: *std.Build,
-    bi: BuildInfo,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
+fn buildInstallShaderc(b: *std.Build, bi: BuildInfo) void {
     const exe = b.addExecutable(.{
         .name = "shaderc",
         .root_module = b.createModule(.{
             .target = bi.target,
-            .optimize = optimize,
+            .optimize = bi.optimize,
         }),
     });
 
@@ -457,8 +650,7 @@ fn buildShaderc(
 
     includeBx(bi, exe);
     exe.linkLibCpp();
-
-    return exe;
+    b.installArtifact(exe);
 }
 
 fn includeBx(bi: BuildInfo, comp: *std.Build.Step.Compile) void {
@@ -491,17 +683,22 @@ const BuildInfo = struct {
     upstream_bgfx: *std.Build.Dependency,
     upstream_bimg: *std.Build.Dependency,
     upstream_bx: *std.Build.Dependency,
+    backend_config: BackendConfig,
 };
 
-fn getBackends(b: *std.Build, tag: std.Target.Os.Tag) ![]const Backend {
+fn getEnabledBackends(
+    allocator: std.mem.Allocator,
+    os_tag: std.Target.Os.Tag,
+    backend_config: BackendConfig,
+) ![]const Backend {
     var backends: std.ArrayListUnmanaged(Backend) = .empty;
-    for (backend_definitions) |def| {
+    inline for (backend_definitions) |def| {
         const enabled = blk: {
-            if (b.option(bool, def.name, def.option_descr)) |enabled| {
+            if (@field(backend_config, def.name)) |enabled| {
                 break :blk enabled;
             } else {
                 for (def.supported_platforms) |supported_tag| {
-                    if (tag == supported_tag) {
+                    if (os_tag == supported_tag) {
                         break :blk true;
                     }
                 }
@@ -510,7 +707,7 @@ fn getBackends(b: *std.Build, tag: std.Target.Os.Tag) ![]const Backend {
             }
         };
 
-        try backends.append(b.allocator, Backend.init(enabled, def));
+        try backends.append(allocator, Backend.init(enabled, def));
     }
 
     return backends.items;

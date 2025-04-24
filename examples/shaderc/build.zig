@@ -1,4 +1,6 @@
-pub fn build(b: *std.Build) void {
+const zig_bgfx = @import("zig_bgfx");
+
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const exe = b.addExecutable(.{
@@ -7,11 +9,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
-    const zig_bgfx = b.lazyImport(@This(), "zig_bgfx") orelse {
-        std.debug.print("couldn't lazyImport 'zig-bgfx'\n", .{});
-        return;
-    };
 
     // choose a default shader model based on OS
     const shader_model: zig_bgfx.ShaderModel = switch (target.result.os.tag) {
@@ -25,34 +22,56 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("fs_color", .{
         .root_source_file = zig_bgfx.buildShader(
             b,
-            target.result,
-            b.path("shaders/fs_color.sc"),
-            .fragment,
-            shader_model,
+            .{
+                .target = target.result,
+                .path = b.path("shaders/fs_color.sc"),
+                .type = .fragment,
+                .model = shader_model,
+            },
         ),
     });
 
-    // install compiled shader in zig-out
+    // install single compiled shader in zig-out
     const shader_install = b.addInstallFile(
         zig_bgfx.buildShader(
             b,
-            target.result,
-            b.path("shaders/vs_default.sc"),
-            .vertex,
-            shader_model,
+            .{
+                .target = target.result,
+                .path = b.path("shaders/vs_default.sc"),
+                .type = .vertex,
+                .model = shader_model,
+            },
         ),
-        b.fmt("vs_default_{s}.bin", .{@tagName(shader_model)}),
+        b.fmt("my_single_shader_vs_default_{s}.bin", .{@tagName(shader_model)}),
     );
     b.getInstallStep().dependOn(&shader_install.step);
 
-    // automatically compile and embed shaders into a module
+    // compile a full directory hierarchy
+    const compiled_shaders = zig_bgfx.buildShaderDir(
+        b,
+        .{
+            .target = target.result,
+            .root_path = "shaders",
+        },
+    ) catch {
+        @panic("failed to compile all shaders in path 'shaders'");
+    };
+
+    // install the compiled shaders in zig-out
+    const shader_dir_install = b.addInstallDirectory(.{
+        .source_dir = compiled_shaders.getDirectory(),
+        .install_dir = .prefix,
+        .install_subdir = "my_shader_dir",
+    });
+    b.getInstallStep().dependOn(&shader_dir_install.step);
+
+    // or create a module to embed directly in zig code
     exe.root_module.addAnonymousImport(
         "shader",
         .{
             .root_source_file = zig_bgfx.createShaderModule(
                 b,
-                target.result,
-                "shaders",
+                compiled_shaders,
             ) catch {
                 std.debug.panic("failed to create shader module from path 'shaders'", .{});
             },
