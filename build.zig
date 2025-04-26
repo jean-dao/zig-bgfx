@@ -541,9 +541,9 @@ fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) void {
 
     // install lib and headers
     b.installArtifact(lib);
-    lib.installHeadersDirectory(bi.upstream_bx.path("include"), "", .{});
-    lib.installHeadersDirectory(bi.upstream_bimg.path("include"), "", .{});
-    lib.installHeadersDirectory(bi.upstream_bgfx.path("include"), "", .{});
+    lib.installHeader(bi.upstream_bx.path("include/bx/platform.h"), "bx/platform.h");
+    lib.installHeader(bi.upstream_bgfx.path("include/bgfx/defines.h"), "bgfx/defines.h");
+    lib.installHeader(bi.upstream_bgfx.path("include/bgfx/c99/bgfx.h"), "bgfx/c99/bgfx.h");
 }
 
 fn buildInstallShaderc(b: *std.Build, bi: BuildInfo) void {
