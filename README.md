@@ -129,7 +129,7 @@ The shader model is derived from the backend, see `shader_default_model` fields 
 
 By default, shaders are compiled for all backends supported by the target. The enabled backends can be overwritten by specifying the relevant options, e.g.:
 ```zig
-const opts: ShaderDirOption = .{
+const opts: ShaderDirOptions = .{
     .target = target,
     .root_path = "shader_directory",
     .backends = .{

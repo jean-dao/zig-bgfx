@@ -1,16 +1,3 @@
-pub const ShaderOption = struct {
-    target: std.Target,
-    path: std.Build.LazyPath,
-    type: ShaderType,
-    model: ShaderModel,
-};
-
-pub const ShaderDirOption = struct {
-    target: std.Target,
-    root_path: []const u8,
-    backends: BackendConfig = .{},
-};
-
 pub const BackendConfig = struct {
     opengl: ?bool = null,
     vulkan: ?bool = null,
@@ -85,9 +72,16 @@ pub fn build(b: *std.Build) void {
         buildInstallShaderc(b, bi);
 }
 
+pub const ShaderOptions = struct {
+    target: std.Target,
+    path: std.Build.LazyPath,
+    type: ShaderType,
+    model: ShaderModel,
+};
+
 pub fn buildShader(
     b: *std.Build,
-    opts: ShaderOption,
+    opts: ShaderOptions,
 ) std.Build.LazyPath {
     const zig_bgfx = b.dependencyFromBuildZig(@This(), .{
         // use native target to build shaderc
@@ -109,9 +103,15 @@ pub fn buildShader(
     );
 }
 
+pub const ShaderDirOptions = struct {
+    target: std.Target,
+    root_path: []const u8,
+    backends: BackendConfig = .{},
+};
+
 pub fn buildShaderDir(
     b: *std.Build,
-    opts: ShaderDirOption,
+    opts: ShaderDirOptions,
 ) !*std.Build.Step.WriteFile {
     const zig_bgfx = b.dependencyFromBuildZig(@This(), .{
         // use native target to build shaderc
@@ -122,11 +122,6 @@ pub fn buildShaderDir(
     });
     const upstream_bgfx = zig_bgfx.builder.dependency("bgfx", .{});
     const shaderc = zig_bgfx.artifact("shaderc");
-    const backends = try getEnabledBackends(
-        b.allocator,
-        opts.target.os.tag,
-        opts.backends,
-    );
 
     var root_dir = b.build_root.handle.openDir(opts.root_path, .{ .iterate = true }) catch |err| {
         std.debug.panic(
@@ -161,28 +156,27 @@ pub fn buildShaderDir(
         const input_path = b.pathJoin(&.{ opts.root_path, entry.path });
         const stem = entry.basename[0 .. entry.basename.len - extension.len];
         const basename = b.fmt("{s}.bin", .{stem});
-        for (backends) |backend| {
-            if (!backend.enabled)
-                continue;
+        inline for (backend_definitions) |backend| {
+            if (backend.isEnabled(opts.target.os.tag, opts.backends)) {
+                // output compiled shader in backend specific directory
+                const rel_output_path = if (rel_dir_path) |p|
+                    b.pathJoin(&.{ backend.name, p, basename })
+                else
+                    b.pathJoin(&.{ backend.name, basename });
 
-            // output compiled shader in backend specific directory
-            const rel_output_path = if (rel_dir_path) |p|
-                b.pathJoin(&.{ backend.name, p, basename })
-            else
-                b.pathJoin(&.{ backend.name, basename });
+                const compiled_shader = buildShaderInner(
+                    b,
+                    shaderc,
+                    upstream_bgfx,
+                    opts.target,
+                    b.path(input_path),
+                    rel_output_path,
+                    shader_type,
+                    backend.shader_default_model,
+                );
 
-            const compiled_shader = buildShaderInner(
-                b,
-                shaderc,
-                upstream_bgfx,
-                opts.target,
-                b.path(input_path),
-                rel_output_path,
-                shader_type,
-                backend.shader_default_model,
-            );
-
-            _ = wf.addCopyFile(compiled_shader, rel_output_path);
+                _ = wf.addCopyFile(compiled_shader, rel_output_path);
+            }
         }
     }
 
@@ -193,8 +187,8 @@ pub fn createShaderModule(
     b: *std.Build,
     input_wf: *std.Build.Step.WriteFile,
 ) !std.Build.LazyPath {
-    var backend: ModuleBuilder = .{};
-    defer backend.deinit(b.allocator);
+    var builder: ModuleBuilder = .{};
+    defer builder.deinit(b.allocator);
 
     const wf = b.addWriteFiles();
     for (input_wf.files.items) |file| {
@@ -205,13 +199,11 @@ pub fn createShaderModule(
             },
         };
         _ = wf.addCopyFile(lazy_path, file.sub_path);
+
+        try builder.add(b.allocator, file.sub_path);
     }
 
-    for (wf.files.items) |file| {
-        try backend.add(b.allocator, file.sub_path);
-    }
-
-    const content = try backend.genContent(b.allocator, wf);
+    const content = try builder.genContent(b.allocator, wf);
     defer b.allocator.free(content);
 
     return wf.add("shader_module.zig", content);
@@ -222,21 +214,32 @@ const ModuleBuilder = struct {
     toplevels: std.StringHashMapUnmanaged(void) = .empty,
     decls: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(void)) = .empty,
 
-    const Gen = struct {
-        embedded_decls: std.StringHashMapUnmanaged([]const u8),
-        backend_type: std.ArrayListUnmanaged(u8),
-        backend_decls: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(u8)),
-        content: std.ArrayListUnmanaged(u8),
+    const BackendGen = struct {
+        type: std.ArrayListUnmanaged(u8),
+        decls: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(u8)),
 
-        const empty: Gen = .{
-            .embedded_decls = .empty,
-            .backend_type = .empty,
-            .backend_decls = .empty,
-            .content = .empty,
-        };
+        fn init(allocator: std.mem.Allocator) !BackendGen {
+            var self: BackendGen = .{
+                .type = .empty,
+                .decls = .empty,
+            };
 
-        fn genField(
-            self: *Gen,
+            for (backend_definitions) |backend| {
+                try self.decls.putNoClobber(allocator, backend.name, .empty);
+
+                const backend_decl = self.decls.getPtr(backend.name).?;
+                try backend_decl.appendSlice(allocator, "pub const ");
+                try backend_decl.appendSlice(allocator, backend.name);
+                try backend_decl.appendSlice(allocator, ": ShaderCollection = .{\n");
+            }
+
+            try self.type.appendSlice(allocator, "const ShaderCollection = struct {\n");
+
+            return self;
+        }
+
+        fn addField(
+            self: *BackendGen,
             allocator: std.mem.Allocator,
             wf: *std.Build.Step.WriteFile,
             field_defs: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(void)),
@@ -244,14 +247,14 @@ const ModuleBuilder = struct {
             indent: []const u8,
         ) !void {
             const name = std.fs.path.stem(field);
-            try self.backend_type.appendSlice(allocator, indent);
-            try self.backend_type.appendSlice(allocator, name);
-            try self.backend_type.appendSlice(allocator, ": ");
+            try self.type.appendSlice(allocator, indent);
+            try self.type.appendSlice(allocator, name);
+            try self.type.appendSlice(allocator, ": ");
 
             if (field_defs.getPtr(field)) |children| {
-                try self.backend_type.appendSlice(allocator, "struct {\n");
+                try self.type.appendSlice(allocator, "struct {\n");
                 {
-                    var backend_it = self.backend_decls.valueIterator();
+                    var backend_it = self.decls.valueIterator();
                     while (backend_it.next()) |backend_decl| {
                         try backend_decl.appendSlice(allocator, indent);
                         try backend_decl.append(allocator, '.');
@@ -268,7 +271,7 @@ const ModuleBuilder = struct {
 
                 var children_it = children.keyIterator();
                 while (children_it.next()) |child_ptr| {
-                    try self.genField(
+                    try self.addField(
                         allocator,
                         wf,
                         field_defs,
@@ -277,19 +280,19 @@ const ModuleBuilder = struct {
                     );
                 }
 
-                try self.backend_type.appendSlice(allocator, indent);
-                try self.backend_type.appendSlice(allocator, "} = .{},\n");
+                try self.type.appendSlice(allocator, indent);
+                try self.type.appendSlice(allocator, "} = .{},\n");
                 {
-                    var backend_it = self.backend_decls.valueIterator();
+                    var backend_it = self.decls.valueIterator();
                     while (backend_it.next()) |backend_decl| {
                         try backend_decl.appendSlice(allocator, indent);
                         try backend_decl.appendSlice(allocator, "},\n");
                     }
                 }
             } else {
-                try self.backend_type.appendSlice(allocator, "[]const u8 = &.{},\n");
+                try self.type.appendSlice(allocator, "[]const u8 = &.{},\n");
 
-                var backend_it = self.backend_decls.iterator();
+                var backend_it = self.decls.iterator();
                 while (backend_it.next()) |kv| {
                     const backend = kv.key_ptr.*;
                     const path = try std.fs.path.join(allocator, &.{ backend, field });
@@ -316,26 +319,31 @@ const ModuleBuilder = struct {
             }
         }
 
-        fn deinit(self: *Gen, allocator: std.mem.Allocator) void {
-            {
-                var it = self.embedded_decls.valueIterator();
-                while (it.next()) |value_ptr| {
-                    allocator.free(value_ptr.*);
-                }
+        fn appendInto(
+            self: BackendGen,
+            allocator: std.mem.Allocator,
+            content: *std.ArrayListUnmanaged(u8),
+        ) !void {
+            try content.appendSlice(allocator, self.type.items);
+            try content.appendSlice(allocator, "};\n\n");
+
+            var backend_decl_it = self.decls.valueIterator();
+            while (backend_decl_it.next()) |backend_decl| {
+                try content.appendSlice(allocator, backend_decl.items);
+                try content.appendSlice(allocator, "};\n\n");
             }
+        }
 
-            self.embedded_decls.deinit(allocator);
-            self.backend_type.deinit(allocator);
+        fn deinit(self: *BackendGen, allocator: std.mem.Allocator) void {
+            self.type.deinit(allocator);
 
             {
-                var it = self.backend_decls.valueIterator();
+                var it = self.decls.valueIterator();
                 while (it.next()) |backend_decl| {
                     backend_decl.deinit(allocator);
                 }
-                self.backend_decls.deinit(allocator);
+                self.decls.deinit(allocator);
             }
-
-            self.content.deinit(allocator);
         }
     };
 
@@ -344,46 +352,29 @@ const ModuleBuilder = struct {
         allocator: std.mem.Allocator,
         wf: *std.Build.Step.WriteFile,
     ) ![]const u8 {
-        var gen: Gen = .empty;
-        defer gen.deinit(allocator);
+        var content: std.ArrayListUnmanaged(u8) = .empty;
 
         // embed shader file declarations
         for (wf.files.items) |file| {
-            try gen.content.appendSlice(allocator, "const @\"");
-            try gen.content.appendSlice(allocator, file.sub_path);
-            try gen.content.appendSlice(allocator, "\" = @embedFile(\"");
-            try gen.content.appendSlice(allocator, file.sub_path);
-            try gen.content.appendSlice(allocator, "\");\n");
+            try content.appendSlice(allocator, "const @\"");
+            try content.appendSlice(allocator, file.sub_path);
+            try content.appendSlice(allocator, "\" = @embedFile(\"");
+            try content.appendSlice(allocator, file.sub_path);
+            try content.appendSlice(allocator, "\");\n");
         }
 
-        try gen.content.append(allocator, '\n');
+        try content.append(allocator, '\n');
 
-        for (backend_definitions) |backend| {
-            try gen.backend_decls.putNoClobber(allocator, backend.name, .empty);
-
-            const backend_decl = gen.backend_decls.getPtr(backend.name).?;
-            try backend_decl.appendSlice(allocator, "pub const ");
-            try backend_decl.appendSlice(allocator, backend.name);
-            try backend_decl.appendSlice(allocator, ": ShaderCollection = .{\n");
-        }
-
-        try gen.backend_type.appendSlice(allocator, "const ShaderCollection = struct {\n");
+        var backend_gen: BackendGen = try .init(allocator);
+        defer backend_gen.deinit(allocator);
 
         var toplevel_it = self.toplevels.keyIterator();
         while (toplevel_it.next()) |toplevel_ptr| {
-            try gen.genField(allocator, wf, self.decls, toplevel_ptr.*, "    ");
+            try backend_gen.addField(allocator, wf, self.decls, toplevel_ptr.*, "    ");
         }
 
-        try gen.content.appendSlice(allocator, gen.backend_type.items);
-        try gen.content.appendSlice(allocator, "};\n\n");
-
-        var backend_decl_it = gen.backend_decls.valueIterator();
-        while (backend_decl_it.next()) |backend_decl| {
-            try gen.content.appendSlice(allocator, backend_decl.items);
-            try gen.content.appendSlice(allocator, "};\n\n");
-        }
-
-        return try gen.content.toOwnedSlice(allocator);
+        try backend_gen.appendInto(allocator, &content);
+        return try content.toOwnedSlice(allocator);
     }
 
     fn add(self: *ModuleBuilder, allocator: std.mem.Allocator, path: []const u8) !void {
@@ -498,9 +489,8 @@ fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) void {
     }
 
     // enable backends
-    const backends = getEnabledBackends(b.allocator, tag, bi.backend_config) catch @panic("OOM");
-    for (backends) |backend| {
-        if (backend.enabled)
+    inline for (backend_definitions) |backend| {
+        if (backend.isEnabled(tag, bi.backend_config))
             lib.root_module.addCMacro(backend.bgfx_config_macro, "1");
     }
 
@@ -686,58 +676,29 @@ const BuildInfo = struct {
     backend_config: BackendConfig,
 };
 
-fn getEnabledBackends(
-    allocator: std.mem.Allocator,
-    os_tag: std.Target.Os.Tag,
-    backend_config: BackendConfig,
-) ![]const Backend {
-    var backends: std.ArrayListUnmanaged(Backend) = .empty;
-    inline for (backend_definitions) |def| {
-        const enabled = blk: {
-            if (@field(backend_config, def.name)) |enabled| {
-                break :blk enabled;
-            } else {
-                for (def.supported_platforms) |supported_tag| {
-                    if (os_tag == supported_tag) {
-                        break :blk true;
-                    }
-                }
-
-                break :blk false;
-            }
-        };
-
-        try backends.append(allocator, Backend.init(enabled, def));
-    }
-
-    return backends.items;
-}
-
 const Backend = struct {
-    enabled: bool,
-    name: []const u8,
-    shader_default_model: ShaderModel,
-    bgfx_config_macro: []const u8,
-
-    fn init(enabled: bool, def: BackendDef) Backend {
-        return .{
-            .enabled = enabled,
-            .name = def.name,
-            .shader_default_model = def.shader_default_model,
-            .bgfx_config_macro = def.bgfx_config_macro,
-        };
-    }
-};
-
-const BackendDef = struct {
     name: []const u8,
     option_descr: []const u8,
     supported_platforms: []const std.Target.Os.Tag,
     shader_default_model: ShaderModel,
     bgfx_config_macro: []const u8,
+
+    fn isEnabled(comptime self: Backend, os_tag: std.Target.Os.Tag, config: BackendConfig) bool {
+        if (@field(config, self.name)) |enabled| {
+            return enabled;
+        } else {
+            for (self.supported_platforms) |supported_tag| {
+                if (os_tag == supported_tag) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
 };
 
-const backend_definitions: []const BackendDef = &.{
+const backend_definitions: []const Backend = &.{
     .{
         .name = "opengl",
         .option_descr = "Enable OpenGL backend",
