@@ -1,11 +1,11 @@
 .{
-    .name = .sdl_bgfx_example,
+    .name = .zig_bgfx_example,
     .version = "0.0.0",
-    .fingerprint = 0xf07512385623788,
+    .fingerprint = 0x614a161c463e13dc,
     .minimum_zig_version = "0.14.0",
     .dependencies = .{
         .zig_bgfx = .{
-            .path = "../..",
+            .path = "..",
         },
         .sdl = .{
             .url = "git+https://github.com/castholm/SDL#f6bbe8ac5e7b901db69ba62f017596090c362d84",
@@ -16,5 +16,10 @@
         "build.zig",
         "build.zig.zon",
         "src/main.zig",
+        "src/math.zig",
+        "shaders/fs_color.sc",
+        "shaders/fs_shaded.sc",
+        "shaders/varying.def.sc",
+        "shaders/vs_default.sc",
     },
 }
