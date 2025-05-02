@@ -217,11 +217,13 @@ const ModuleBuilder = struct {
     const BackendGen = struct {
         type: std.ArrayListUnmanaged(u8),
         decls: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(u8)),
+        escaped_path_sep: []const u8,
 
-        fn init(allocator: std.mem.Allocator) !BackendGen {
+        fn init(allocator: std.mem.Allocator, escaped_path_sep: []const u8) !BackendGen {
             var self: BackendGen = .{
                 .type = .empty,
                 .decls = .empty,
+                .escaped_path_sep = escaped_path_sep,
             };
 
             for (backend_definitions) |backend| {
@@ -312,7 +314,7 @@ const ModuleBuilder = struct {
                     try backend_decl.appendSlice(allocator, name);
                     try backend_decl.appendSlice(allocator, " = @\"");
                     try backend_decl.appendSlice(allocator, backend);
-                    try backend_decl.appendSlice(allocator, std.fs.path.sep_str);
+                    try backend_decl.appendSlice(allocator, self.escaped_path_sep);
                     try backend_decl.appendSlice(allocator, field);
                     try backend_decl.appendSlice(allocator, "\"[0..],\n");
                 }
@@ -353,19 +355,44 @@ const ModuleBuilder = struct {
         wf: *std.Build.Step.WriteFile,
     ) ![]const u8 {
         var content: std.ArrayListUnmanaged(u8) = .empty;
+        const escaped_path_sep = blk: {
+            const size = std.mem.replacementSize(u8, std.fs.path.sep_str, "\\", "\\\\");
+            const output = try allocator.alloc(u8, size);
+            _ = std.mem.replace(u8, std.fs.path.sep_str, "\\", "\\\\", output);
+            break :blk output;
+        };
+        defer allocator.free(escaped_path_sep);
 
         // embed shader file declarations
         for (wf.files.items) |file| {
+            const escaped_name = blk: {
+                const size = std.mem.replacementSize(
+                    u8,
+                    file.sub_path,
+                    std.fs.path.sep_str,
+                    escaped_path_sep,
+                );
+                const output = try allocator.alloc(u8, size);
+                _ = std.mem.replace(
+                    u8,
+                    file.sub_path,
+                    std.fs.path.sep_str,
+                    escaped_path_sep,
+                    output,
+                );
+                break :blk output;
+            };
+            defer allocator.free(escaped_name);
             try content.appendSlice(allocator, "const @\"");
-            try content.appendSlice(allocator, file.sub_path);
+            try content.appendSlice(allocator, escaped_name);
             try content.appendSlice(allocator, "\" = @embedFile(\"");
-            try content.appendSlice(allocator, file.sub_path);
+            try content.appendSlice(allocator, escaped_name);
             try content.appendSlice(allocator, "\");\n");
         }
 
         try content.append(allocator, '\n');
 
-        var backend_gen: BackendGen = try .init(allocator);
+        var backend_gen: BackendGen = try .init(allocator, escaped_path_sep);
         defer backend_gen.deinit(allocator);
 
         var toplevel_it = self.toplevels.keyIterator();
