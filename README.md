@@ -41,17 +41,20 @@ const c = @cImport({
 
 ### Available backends
 
-The following BGFX backends are available:
+The following BGFX backends are supported:
 
 - `vulkan`
 - `opengl`
-- `directx` (DirectX 11)
+- `directx11`
+- `directx12`
 - `metal`
+
+The `opengles` backend is not tested and not included by default, but can be manually enabled.
 
 By default the following backends will be enabled on the following targets:
 
 - linux: `vulkan`, `opengl`
-- windows: `vulkan`, `opengl`, `directx`
+- windows: `vulkan`, `opengl`, `directx11`, `directx12`
 - macos: `metal`
 
 You can manually enable/disable targets via options, e.g.:
@@ -62,6 +65,8 @@ const bgfx = b.dependency("zig_bgfx", .{
     .opengl = false,
 });
 ```
+
+A specific OpenGL version can be set via the "opengl-version" option. It is used to set the `BGFX_CONFIG_RENDERER_OPENGL` build macro, thus following the same format: 2-digit major/minor number (e.g. "21" is OpenGL 2.1).
 
 ## Using `shaderc`
 
@@ -105,12 +110,13 @@ const shader_dir = try zig_bgfx.buildShaderDir(
     .{
         .target = target.result,          // std.Target
         .root_path = "shader_directory",  // path of shaders root directory
+        // backend_configs omitted to use default
     },
 );
 
 // install to zig-out
 const shader_dir_install = b.addInstallDirectory(.{
-    .source_dir = shader_dir.getDirectory(),
+    .source_dir = shader_dir.files.getDirectory(),
     .install_dir = .prefix,
     .install_subdir = "my_shader_dir",
 });
@@ -123,18 +129,7 @@ Shader files need to end with `.sc` and need to be prefixed with:
 -  Vertex shaders: `vs_`
 -  Compute shaders: `cs_`
 
-The shader model is derived from the backend, see `shader_default_model` fields of `BackendDef` definitions.
-
-By default, shaders are compiled for all backends supported by the target. The enabled backends can be overwritten by specifying the relevant options, e.g.:
-```zig
-const opts: ShaderDirOptions = .{
-    .target = target,
-    .root_path = "shader_directory",
-    .backends = .{
-        .opengl = false,
-    },
-};
-```
+Shader files will be compiled for each backend defined by the `backend_configs` parameter. See `default_shaderc_backend_configs` for the default backend definitions. See [example/build.zig](example/build.zig) for an example of custom backend definitions.
 
 ### `createShaderModule()`
 
@@ -155,3 +150,5 @@ const shaders = switch (c.bgfx_get_renderer_type()) {
 const ref = c.bgfx_make_ref(shaders.foo.fs_bar.ptr, @intCast(shaders.foo.fs_bar.len));
 const shader_handle = c.bgfx_create_shader(ref);
 ```
+
+**Warning**: Make sure the shader models defined by the [`buildShaderDir()`](#buildshaderdir) `backend_configs` parameter are compatible with the BGFX library compiled backends. For example, a BGFX library compiled with "opengl-version=21" won't be able to load shaders compiled with a shader model "140" (GLSL 1.4), since OpenGL 2.1 only support GLSL 1.2 (shader model "120").

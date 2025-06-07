@@ -1,8 +1,43 @@
-pub const BackendConfig = struct {
-    opengl: ?bool = null,
-    vulkan: ?bool = null,
-    directx: ?bool = null,
-    metal: ?bool = null,
+pub const ShadercBackendConfig = struct {
+    enabled: ?bool = null,
+    supported_platforms: []const std.Target.Os.Tag = &.{},
+    name: []const u8,
+    shader_model: ShaderModel,
+
+    fn isEnabled(self: ShadercBackendConfig, platform: std.Target.Os.Tag) bool {
+        if (self.enabled) |enabled|
+            return enabled;
+
+        for (self.supported_platforms) |supported_platform| {
+            if (supported_platform == platform)
+                return true;
+        }
+
+        return false;
+    }
+};
+
+pub const default_shaderc_backend_configs: []const ShadercBackendConfig = &.{
+    .{
+        .name = "opengl",
+        .supported_platforms = &.{ .windows, .linux },
+        .shader_model = .@"120",
+    },
+    .{
+        .name = "vulkan",
+        .supported_platforms = &.{ .windows, .linux },
+        .shader_model = .spirv,
+    },
+    .{
+        .name = "metal",
+        .supported_platforms = &.{.macos},
+        .shader_model = .metal,
+    },
+    .{
+        .name = "directx",
+        .supported_platforms = &.{.windows},
+        .shader_model = .s_5_0,
+    },
 };
 
 pub const ShaderType = enum {
@@ -48,21 +83,33 @@ pub const ShaderModel = enum {
     @"440",
 };
 
+pub const BackendType = enum {
+    directx11,
+    directx12,
+    metal,
+    vulkan,
+    opengl,
+};
+
+pub const Backend = union(BackendType) {
+    directx11,
+    directx12,
+    metal,
+    vulkan,
+    opengl: struct {
+        gles: bool = false,
+        version: u8,
+    },
+};
+
 pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
     const bi: BuildInfo = .{
-        .target = b.standardTargetOptions(.{}),
+        .target = target,
         .optimize = b.standardOptimizeOption(.{}),
         .upstream_bgfx = b.dependency("bgfx", .{}),
         .upstream_bimg = b.dependency("bimg", .{}),
         .upstream_bx = b.dependency("bx", .{}),
-        .backend_config = blk: {
-            var bc: BackendConfig = .{};
-            inline for (backend_definitions) |def| {
-                if (b.option(bool, def.name, def.option_descr)) |enabled|
-                    @field(bc, def.name) = enabled;
-            }
-            break :blk bc;
-        },
     };
 
     if (b.option(bool, "bgfx", "Build BGFX library") orelse true)
@@ -71,6 +118,76 @@ pub fn build(b: *std.Build) void {
     if (b.option(bool, "shaderc", "Build shaderc") orelse false)
         buildInstallShaderc(b, bi);
 }
+
+fn getConfiguredBackend(b: *std.Build, tag: std.Target.Os.Tag, backend_type: BackendType) ?Backend {
+    const name = @tagName(backend_type);
+    switch (backend_type) {
+        .opengl => {
+            const opengl = b.option(bool, "opengl", "Enable BGFX 'opengl' backend") orelse
+                backendDefaultSupport(backend_type, tag);
+
+            const opengl_version = b.option(
+                u8,
+                "opengl-version",
+                b.fmt(
+                    "BGFX 'opengl' backend version (2-digit major-minor format, default: {})",
+                    .{default_opengl_version},
+                ),
+            ) orelse default_opengl_version;
+
+            // OpenGLES is not supported out of the box (untested), so only enable it when explicitly set
+            const opengles = b.option(bool, "opengles", "Enable BGFX 'opengles' backend") orelse false;
+            const opengles_version = b.option(
+                u8,
+                "opengles-version",
+                b.fmt(
+                    "BGFX 'opengles' backend version (2-digit major-minor format, default: {})",
+                    .{default_opengles_version},
+                ),
+            ) orelse default_opengles_version;
+
+            if (opengl and opengles)
+                @panic("Cannot enable both 'opengl' and 'opengles' at the same time");
+
+            if (!opengl and !opengles)
+                return null;
+
+            if (opengl)
+                return .{ .opengl = .{ .gles = false, .version = opengl_version } };
+            if (opengles)
+                return .{ .opengl = .{ .gles = true, .version = opengles_version } };
+            return null;
+        },
+        inline else => |nocfg_backend| {
+            if (b.option(bool, name, b.fmt("Enable BGFX '{s}' backend", .{name}))) |enabled|
+                return if (enabled) nocfg_backend else null;
+
+            if (backendDefaultSupport(nocfg_backend, tag))
+                return nocfg_backend;
+
+            return null;
+        },
+    }
+}
+
+fn backendDefaultSupport(backend: BackendType, platform: std.Target.Os.Tag) bool {
+    for (default_platforms.get(backend)) |default_platform| {
+        if (default_platform == platform)
+            return true;
+    }
+
+    return false;
+}
+
+const default_platforms: std.enums.EnumArray(BackendType, []const std.Target.Os.Tag) = .init(.{
+    .directx11 = &.{.windows},
+    .directx12 = &.{.windows},
+    .metal = &.{.macos},
+    .vulkan = &.{ .linux, .windows },
+    .opengl = &.{ .linux, .windows },
+});
+const default_opengl_version = 21;
+const default_opengles_version = 20;
 
 pub const ShaderOptions = struct {
     target: std.Target,
@@ -106,13 +223,18 @@ pub fn buildShader(
 pub const ShaderDirOptions = struct {
     target: std.Target,
     root_path: []const u8,
-    backends: BackendConfig = .{},
+    backend_configs: []const ShadercBackendConfig = default_shaderc_backend_configs,
+};
+
+const ShaderDir = struct {
+    files: *std.Build.Step.WriteFile,
+    backend_names: []const []const u8,
 };
 
 pub fn buildShaderDir(
     b: *std.Build,
     opts: ShaderDirOptions,
-) !*std.Build.Step.WriteFile {
+) !ShaderDir {
     const zig_bgfx = b.dependencyFromBuildZig(@This(), .{
         // use native target to build shaderc
         .target = b.resolveTargetQuery(.{}),
@@ -156,13 +278,13 @@ pub fn buildShaderDir(
         const input_path = b.pathJoin(&.{ opts.root_path, entry.path });
         const stem = entry.basename[0 .. entry.basename.len - extension.len];
         const basename = b.fmt("{s}.bin", .{stem});
-        inline for (backend_definitions) |backend| {
-            if (backend.isEnabled(opts.target.os.tag, opts.backends)) {
+        for (opts.backend_configs) |backend_config| {
+            if (backend_config.isEnabled(opts.target.os.tag)) {
                 // output compiled shader in backend specific directory
                 const rel_output_path = if (rel_dir_path) |p|
-                    b.pathJoin(&.{ backend.name, p, basename })
+                    b.pathJoin(&.{ backend_config.name, p, basename })
                 else
-                    b.pathJoin(&.{ backend.name, basename });
+                    b.pathJoin(&.{ backend_config.name, basename });
 
                 const compiled_shader = buildShaderInner(
                     b,
@@ -172,7 +294,7 @@ pub fn buildShaderDir(
                     b.path(input_path),
                     rel_output_path,
                     shader_type,
-                    backend.shader_default_model,
+                    backend_config.shader_model,
                 );
 
                 _ = wf.addCopyFile(compiled_shader, rel_output_path);
@@ -180,21 +302,26 @@ pub fn buildShaderDir(
         }
     }
 
-    return wf;
+    var backend_names: std.ArrayList([]const u8) = .init(b.allocator);
+    for (opts.backend_configs) |backend_config| {
+        try backend_names.append(backend_config.name);
+    }
+
+    return .{ .files = wf, .backend_names = backend_names.items };
 }
 
 pub fn createShaderModule(
     b: *std.Build,
-    input_wf: *std.Build.Step.WriteFile,
+    input: ShaderDir,
 ) !std.Build.LazyPath {
     var builder: ModuleBuilder = .{};
     defer builder.deinit(b.allocator);
 
     const wf = b.addWriteFiles();
-    for (input_wf.files.items) |file| {
+    for (input.files.files.items) |file| {
         const lazy_path: std.Build.LazyPath = .{
             .generated = .{
-                .file = &input_wf.generated_directory,
+                .file = &input.files.generated_directory,
                 .sub_path = file.sub_path,
             },
         };
@@ -203,7 +330,7 @@ pub fn createShaderModule(
         try builder.add(b.allocator, file.sub_path);
     }
 
-    const content = try builder.genContent(b.allocator, wf);
+    const content = try builder.genContent(b.allocator, input);
     defer b.allocator.free(content);
 
     return wf.add("shader_module.zig", content);
@@ -219,19 +346,23 @@ const ModuleBuilder = struct {
         decls: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(u8)),
         escaped_path_sep: []const u8,
 
-        fn init(allocator: std.mem.Allocator, escaped_path_sep: []const u8) !BackendGen {
+        fn init(
+            allocator: std.mem.Allocator,
+            escaped_path_sep: []const u8,
+            backend_names: []const []const u8,
+        ) !BackendGen {
             var self: BackendGen = .{
                 .type = .empty,
                 .decls = .empty,
                 .escaped_path_sep = escaped_path_sep,
             };
 
-            for (backend_definitions) |backend| {
-                try self.decls.putNoClobber(allocator, backend.name, .empty);
+            for (backend_names) |backend_name| {
+                try self.decls.putNoClobber(allocator, backend_name, .empty);
 
-                const backend_decl = self.decls.getPtr(backend.name).?;
+                const backend_decl = self.decls.getPtr(backend_name).?;
                 try backend_decl.appendSlice(allocator, "pub const ");
-                try backend_decl.appendSlice(allocator, backend.name);
+                try backend_decl.appendSlice(allocator, backend_name);
                 try backend_decl.appendSlice(allocator, ": ShaderCollection = .{\n");
             }
 
@@ -352,7 +483,7 @@ const ModuleBuilder = struct {
     fn genContent(
         self: *ModuleBuilder,
         allocator: std.mem.Allocator,
-        wf: *std.Build.Step.WriteFile,
+        input: ShaderDir,
     ) ![]const u8 {
         var content: std.ArrayListUnmanaged(u8) = .empty;
         const escaped_path_sep = blk: {
@@ -364,7 +495,7 @@ const ModuleBuilder = struct {
         defer allocator.free(escaped_path_sep);
 
         // embed shader file declarations
-        for (wf.files.items) |file| {
+        for (input.files.files.items) |file| {
             const escaped_name = blk: {
                 const size = std.mem.replacementSize(
                     u8,
@@ -392,12 +523,12 @@ const ModuleBuilder = struct {
 
         try content.append(allocator, '\n');
 
-        var backend_gen: BackendGen = try .init(allocator, escaped_path_sep);
+        var backend_gen: BackendGen = try .init(allocator, escaped_path_sep, input.backend_names);
         defer backend_gen.deinit(allocator);
 
         var toplevel_it = self.toplevels.keyIterator();
         while (toplevel_it.next()) |toplevel_ptr| {
-            try backend_gen.addField(allocator, wf, self.decls, toplevel_ptr.*, "    ");
+            try backend_gen.addField(allocator, input.files, self.decls, toplevel_ptr.*, "    ");
         }
 
         try backend_gen.appendInto(allocator, &content);
@@ -516,9 +647,19 @@ fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) void {
     }
 
     // enable backends
-    inline for (backend_definitions) |backend| {
-        if (backend.isEnabled(tag, bi.backend_config))
-            lib.root_module.addCMacro(backend.bgfx_config_macro, "1");
+    for (std.enums.values(BackendType)) |backend_type| {
+        if (getConfiguredBackend(b, tag, backend_type)) |backend| {
+            switch (backend) {
+                .directx11 => lib.root_module.addCMacro("BGFX_CONFIG_RENDERER_DIRECT3D11", "1"),
+                .directx12 => lib.root_module.addCMacro("BGFX_CONFIG_RENDERER_DIRECT3D12", "1"),
+                .metal => lib.root_module.addCMacro("BGFX_CONFIG_RENDERER_METAL", "1"),
+                .vulkan => lib.root_module.addCMacro("BGFX_CONFIG_RENDERER_VULKAN", "1"),
+                .opengl => |cfg| lib.root_module.addCMacro(
+                    if (cfg.gles) "BGFX_CONFIG_RENDERER_OPENGLES" else "BGFX_CONFIG_RENDERER_OPENGL",
+                    b.fmt("{}", .{cfg.version}),
+                ),
+            }
+        }
     }
 
     // include paths
@@ -552,6 +693,10 @@ fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) void {
         .flags = bgfx_cpp_flags,
     });
 
+    lib.root_module.addCMacro("BX_CONFIG_DEBUG", switch (bi.optimize) {
+        .Debug => "1",
+        .ReleaseSafe, .ReleaseFast, .ReleaseSmall => "0",
+    });
     includeBx(bi, lib);
 
     lib.linkLibCpp();
@@ -665,13 +810,13 @@ fn buildInstallShaderc(b: *std.Build, bi: BuildInfo) void {
         exe.linkFramework("Cocoa");
     }
 
+    exe.root_module.addCMacro("BX_CONFIG_DEBUG", "0");
     includeBx(bi, exe);
     exe.linkLibCpp();
     b.installArtifact(exe);
 }
 
 fn includeBx(bi: BuildInfo, comp: *std.Build.Step.Compile) void {
-    comp.root_module.addCMacro("BX_CONFIG_DEBUG", "0");
     comp.addIncludePath(bi.upstream_bx.path("include"));
     comp.addIncludePath(bi.upstream_bx.path("3rdparty"));
 
@@ -700,60 +845,6 @@ const BuildInfo = struct {
     upstream_bgfx: *std.Build.Dependency,
     upstream_bimg: *std.Build.Dependency,
     upstream_bx: *std.Build.Dependency,
-    backend_config: BackendConfig,
-};
-
-const Backend = struct {
-    name: []const u8,
-    option_descr: []const u8,
-    supported_platforms: []const std.Target.Os.Tag,
-    shader_default_model: ShaderModel,
-    bgfx_config_macro: []const u8,
-
-    fn isEnabled(comptime self: Backend, os_tag: std.Target.Os.Tag, config: BackendConfig) bool {
-        if (@field(config, self.name)) |enabled| {
-            return enabled;
-        } else {
-            for (self.supported_platforms) |supported_tag| {
-                if (os_tag == supported_tag) {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-    }
-};
-
-const backend_definitions: []const Backend = &.{
-    .{
-        .name = "opengl",
-        .option_descr = "Enable OpenGL backend",
-        .supported_platforms = &.{ .windows, .linux },
-        .shader_default_model = .@"120",
-        .bgfx_config_macro = "BGFX_CONFIG_RENDERER_OPENGL",
-    },
-    .{
-        .name = "vulkan",
-        .option_descr = "Enable Vulkan backend",
-        .supported_platforms = &.{ .windows, .linux },
-        .shader_default_model = .spirv,
-        .bgfx_config_macro = "BGFX_CONFIG_RENDERER_VULKAN",
-    },
-    .{
-        .name = "directx",
-        .option_descr = "Enable DirectX 11 backend",
-        .supported_platforms = &.{.windows},
-        .shader_default_model = .s_5_0,
-        .bgfx_config_macro = "BGFX_CONFIG_RENDERER_DIRECT3D11",
-    },
-    .{
-        .name = "metal",
-        .option_descr = "Enable Metal backend",
-        .supported_platforms = &.{.macos},
-        .shader_default_model = .metal,
-        .bgfx_config_macro = "BGFX_CONFIG_RENDERER_METAL",
-    },
 };
 
 const bgfx_cpp_flags = &.{

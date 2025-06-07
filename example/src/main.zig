@@ -15,7 +15,12 @@ pub fn main() void {
     defer c.SDL_DestroyWindow(window);
 
     // make sure to properly populate `bgfx_init_t` struct
-    // see `Init::Init()` and `Init::Limits::Limits()` in BGFX `src/bgfx.cpp` file
+    // see the following definition in BGFX `src/bgfx.cpp` file:
+    // - Init::Init()
+    // - Init::Limits::Limits()
+    // - Resolution::Resolution()
+    // - PlatformData::PlatformData()
+    // the C API doesn't provide defaults
     var bgfx_init = std.mem.zeroes(c.bgfx_init_t);
     bgfx_init.type = c.BGFX_RENDERER_TYPE_COUNT;
     bgfx_init.vendorId = c.BGFX_PCI_ID_NONE;
@@ -43,6 +48,7 @@ pub fn main() void {
 
     const renderer_type = c.bgfx_get_renderer_type();
     const backend_name = c.bgfx_get_renderer_name(renderer_type);
+    std.debug.print("Using {s} backend\n", .{backend_name});
 
     // select shaders compatible with current BGFX backend
     const shaders = switch (renderer_type) {

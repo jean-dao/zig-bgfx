@@ -21,6 +21,10 @@ pub fn build(b: *std.Build) void {
     const bgfx = b.dependency("zig_bgfx", .{
         .target = target,
         .optimize = .ReleaseFast,
+        // example: disable DirectX 12 support
+        .directx12 = false,
+        // example: set supported OpenGL version (GLSL 1.4 used below is only supported since OpenGL 3.1)
+        .@"opengl-version" = 31,
     });
     exe.linkLibrary(bgfx.artifact("bgfx"));
 
@@ -28,6 +32,12 @@ pub fn build(b: *std.Build) void {
     const shader_dir = zig_bgfx.buildShaderDir(b, .{
         .target = target.result,
         .root_path = "shaders",
+        .backend_configs = &.{
+            .{ .name = "opengl", .shader_model = .@"140", .supported_platforms = &.{ .windows, .linux } },
+            .{ .name = "vulkan", .shader_model = .spirv, .supported_platforms = &.{ .windows, .linux } },
+            .{ .name = "directx", .shader_model = .s_5_0, .supported_platforms = &.{.windows} },
+            .{ .name = "metal", .shader_model = .metal, .supported_platforms = &.{.macos} },
+        },
     }) catch {
         @panic("failed to compile all shaders in path 'shaders'");
     };
@@ -43,7 +53,7 @@ pub fn build(b: *std.Build) void {
 
     // install compiled shaders in zig-out
     const shader_dir_install = b.addInstallDirectory(.{
-        .source_dir = shader_dir.getDirectory(),
+        .source_dir = shader_dir.files.getDirectory(),
         .install_dir = .prefix,
         .install_subdir = "my_shader_dir",
     });
