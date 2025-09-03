@@ -592,6 +592,7 @@ fn buildShaderInner(
     shader_model: ShaderModel,
 ) std.Build.LazyPath {
     const shaderc_step = b.addRunArtifact(shaderc);
+    shaderc_step.expectStdOutEqual("");
     shaderc_step.addArg("-i");
     shaderc_step.addDirectoryArg(upstream_bgfx.path("src"));
     shaderc_step.addArg("-f");
