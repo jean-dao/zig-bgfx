@@ -302,9 +302,9 @@ pub fn buildShaderDir(
         }
     }
 
-    var backend_names: std.ArrayList([]const u8) = .init(b.allocator);
+    var backend_names: std.ArrayList([]const u8) = .{};
     for (opts.backend_configs) |backend_config| {
-        try backend_names.append(backend_config.name);
+        try backend_names.append(b.allocator, backend_config.name);
     }
 
     return .{ .files = wf, .backend_names = backend_names.items };
