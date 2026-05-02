@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
     });
-    exe.linkLibrary(sdl.artifact("SDL3"));
+    exe.root_module.linkLibrary(sdl.artifact("SDL3"));
 
     // link BGFX
     const bgfx = b.dependency("zig_bgfx", .{
@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
         // example: set supported OpenGL version (GLSL 1.4 used below is only supported since OpenGL 3.1)
         .@"opengl-version" = 31,
     });
-    exe.linkLibrary(bgfx.artifact("bgfx"));
+    exe.root_module.linkLibrary(bgfx.artifact("bgfx"));
 
     // compile shaders
     const shader_dir = zig_bgfx.buildShaderDir(b, .{

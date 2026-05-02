@@ -4,6 +4,8 @@ Build BGFX with Zig. Includes BGFX library and `shaderc` shader compiler. Comes 
 
 The [example](example) directory contains a fully working example using both BGFX library and `shaderc` helpers.
 
+Current Zig version supported: 0.16.0.
+
 ## How to use
 
 Add the dependency to your `build.zig.zon`, either via:

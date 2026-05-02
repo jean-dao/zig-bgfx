@@ -2,7 +2,7 @@
     .name = .zig_bgfx,
     .version = "0.0.0",
     .fingerprint = 0x58e0ebfd604c78e5,
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .bgfx = .{
             .url = "git+https://github.com/bkaradzic/bgfx#0e734522cd8fafa29c8035cbde671ecec62668a3",
