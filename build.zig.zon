@@ -5,16 +5,16 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .bgfx = .{
-            .url = "git+https://github.com/bkaradzic/bgfx#0e734522cd8fafa29c8035cbde671ecec62668a3",
-            .hash = "N-V-__8AAB00_QmNC8RQHQHtAwe6lgoAqFessJ9nAMUKbeAW",
+            .url = "git+https://github.com/bkaradzic/bgfx#b7d5c2572c59be06d4babe14109b2aa3e33cd080",
+            .hash = "N-V-__8AAOxceQ4TvFCu5l2xqyTK-exF5y933AGSI6gkFwOt",
         },
         .bimg = .{
-            .url = "git+https://github.com/bkaradzic/bimg#446b9eb11130821fd11607c2fc94aee80976e56a",
-            .hash = "N-V-__8AAJg0OQDeaUfXTiHbjQjup50OwF5iPZpwC7oclZIy",
+            .url = "git+https://github.com/bkaradzic/bimg#e4294241cd6ee295bac10f9c7b1b92d8a7dc14aa",
+            .hash = "N-V-__8AAIqHOQBrhIn_9FfZzDi5LY5sF-dJeE1GU36fDkmy",
         },
         .bx = .{
-            .url = "git+https://github.com/bkaradzic/bx#d3d403170e0153160227621b69ae75c60b3ae7b0",
-            .hash = "N-V-__8AAG0JTQDDwCcEUdgs2I_dtfAkjI7e63s5bdypEMBM",
+            .url = "git+https://github.com/bkaradzic/bx#0f575d58808ca0837c3754d9902b754db6c25416",
+            .hash = "N-V-__8AAM9rUQCuMNPYPBieciGonnSKuxMrpVMPQJU1HEV9",
         },
     },
     .paths = .{

@@ -21,21 +21,34 @@ pub fn main() void {
     // - Resolution::Resolution()
     // - PlatformData::PlatformData()
     // the C API doesn't provide defaults
-    var bgfx_init = std.mem.zeroes(c.bgfx_init_t);
-    bgfx_init.type = c.BGFX_RENDERER_TYPE_COUNT;
-    bgfx_init.vendorId = c.BGFX_PCI_ID_NONE;
-    bgfx_init.capabilities = std.math.maxInt(u64);
-    bgfx_init.resolution.format = c.BGFX_TEXTURE_FORMAT_RGBA8;
-    bgfx_init.resolution.width = width;
-    bgfx_init.resolution.height = height;
-    bgfx_init.resolution.reset = c.BGFX_RESET_VSYNC;
-    bgfx_init.resolution.numBackBuffers = 2;
-    bgfx_init.limits.maxEncoders = 8;
-    bgfx_init.limits.minResourceCbSize = 64 << 10;
-    bgfx_init.limits.transientVbSize = 6 << 20;
-    bgfx_init.limits.transientIbSize = 2 << 20;
+    var bgfx_init: c.bgfx_init_t = .{
+        .type = c.BGFX_RENDERER_TYPE_COUNT,
+        .vendorId = c.BGFX_PCI_ID_NONE,
+        .deviceId = 0,
+        .capabilities = std.math.maxInt(u64),
+        .debug = false,
+        .profile = false,
+        .fallback = false,
+        .platformData = getPlatformData(window),
+        .resolution = .{
+            .formatColor = c.BGFX_TEXTURE_FORMAT_BGRA8,
+            .formatDepthStencil = c.BGFX_TEXTURE_FORMAT_D24S8,
+            .width = width,
+            .height = height,
+            .reset = c.BGFX_RESET_VSYNC,
+            .numBackBuffers = 2,
+            .maxFrameLatency = 0,
+            .debugTextScale = 0,
+        },
+        .limits = .{
+            .maxEncoders = 8,
+            .minResourceCbSize = 64 << 10,
+            .maxTransientVbSize = 6 << 20,
+            .maxTransientIbSize = 2 << 20,
+            .minUniformBufferSize = 1 << 20,
+        },
+    };
 
-    bgfx_init.platformData = getPlatformData(window);
     c.bgfx_set_platform_data(&bgfx_init.platformData);
 
     // macos needs this
@@ -155,7 +168,7 @@ pub fn main() void {
         c.bgfx_dbg_text_printf(1, 5, 0xf, "Press Tab to cycle through colors");
 
         // render frame
-        _ = c.bgfx_frame(false);
+        _ = c.bgfx_frame(c.BGFX_FRAME_NONE);
     }
 }
 
@@ -264,7 +277,7 @@ fn createCube() struct { c.bgfx_vertex_buffer_handle_t, c.bgfx_index_buffer_hand
 fn bgfxAlloc(comptime T: type, count: usize) struct { []T, *const c.bgfx_memory_t } {
     const size: u32 = @intCast(count * @sizeOf(T));
     const mem: *const c.bgfx_memory_t = c.bgfx_alloc(size) orelse @panic("OOM");
-    const ptr: [*]align(@alignOf(T)) T = @alignCast(@ptrCast(mem.data));
+    const ptr: [*]align(@alignOf(T)) T = @ptrCast(@alignCast(mem.data));
     return .{ ptr[0..count], mem };
 }
 

@@ -695,7 +695,7 @@ fn buildInstallBgfx(b: *std.Build, bi: BuildInfo) void {
 
     lib.root_module.addCSourceFiles(.{
         .root = bi.upstream_bgfx.path("src"),
-        .files = if (tag == .macos) macos_bgfx_src_files else bgfx_src_files,
+        .files = bgfx_src_files,
         .flags = bgfx_cpp_flags,
     });
 
@@ -805,6 +805,15 @@ fn buildInstallShaderc(b: *std.Build, bi: BuildInfo) void {
     exe.root_module.addIncludePath(bi.upstream_bgfx.path("3rdparty/glsl-optimizer/src/glsl"));
     exe.root_module.addIncludePath(bi.upstream_bgfx.path("3rdparty/spirv-cross"));
     exe.root_module.addIncludePath(bi.upstream_bgfx.path("3rdparty/spirv-tools/include"));
+
+    switch (bi.target.result.os.tag) {
+        .linux, .macos => {
+            exe.root_module.addIncludePath(bi.upstream_bgfx.path("3rdparty/directx-headers/include/wsl/stubs"));
+            exe.root_module.addIncludePath(bi.upstream_bgfx.path("3rdparty/directx-headers/include/directx"));
+        },
+        else => {},
+    }
+
     exe.root_module.addCSourceFiles(.{
         .root = bi.upstream_bgfx.path(""),
         .files = shaderc_src_files,
@@ -852,6 +861,7 @@ const BuildInfo = struct {
 };
 
 const bgfx_cpp_flags = &.{
+    "-std=c++20",
     "-fno-strict-aliasing",
     "-fno-exceptions",
     "-fno-sanitize=undefined",
@@ -898,10 +908,6 @@ const bgfx_src_files = &.{
     "amalgamated.cpp",
 };
 
-const macos_bgfx_src_files = &.{
-    "amalgamated.mm",
-};
-
 const spirv_tools_cpp_flags = &.{
     "-Wno-switch",
     "-Wno-misleading-indentation",
@@ -909,6 +915,7 @@ const spirv_tools_cpp_flags = &.{
 };
 
 const spirv_tools_src_files = &.{
+    "link/fnvar.cpp",
     "opt/aggressive_dead_code_elim_pass.cpp",
     "opt/pass_manager.cpp",
     "opt/dead_insert_elim_pass.cpp",
@@ -1026,6 +1033,10 @@ const spirv_tools_src_files = &.{
     "opt/strip_nonsemantic_info_pass.cpp",
     "opt/fix_storage_class.cpp",
     "opt/upgrade_memory_model.cpp",
+    "opt/canonicalize_ids_pass.cpp",
+    "opt/graph.cpp",
+    "opt/legalize_multidim_array_pass.cpp",
+    "opt/resolve_binding_conflicts_pass.cpp",
     "reduce/structured_loop_to_selection_reduction_opportunity_finder.cpp",
     "reduce/simple_conditional_branch_to_branch_reduction_opportunity.cpp",
     "reduce/remove_instruction_reduction_opportunity.cpp",
@@ -1102,11 +1113,17 @@ const spirv_tools_src_files = &.{
     "val/validate_conversion.cpp",
     "val/validate_adjacency.cpp",
     "val/validate_memory.cpp",
+    "val/validate_dot_product.cpp",
+    "val/validate_graph.cpp",
+    "val/validate_group.cpp",
+    "val/validate_invalid_type.cpp",
+    "val/validate_logical_pointers.cpp",
+    "val/validate_pipe.cpp",
+    "val/validate_tensor.cpp",
     "assembly_grammar.cpp",
     "binary.cpp",
     "diagnostic.cpp",
     "disassemble.cpp",
-    "enum_string_mapping.cpp",
     "ext_inst.cpp",
     "extensions.cpp",
     "libspirv.cpp",
@@ -1122,6 +1139,7 @@ const spirv_tools_src_files = &.{
     "spirv_target_env.cpp",
     "spirv_validator_options.cpp",
     "table.cpp",
+    "table2.cpp",
     "text.cpp",
     "text_handler.cpp",
     "to_string.cpp",
@@ -1219,7 +1237,6 @@ const glslang_src_files = &.{
     "SPIRV/GlslangToSpv.cpp",
     "SPIRV/InReadableOrder.cpp",
     "SPIRV/CInterface/spirv_c_interface.cpp",
-    "SPIRV/SPVRemapper.cpp",
     "SPIRV/SpvBuilder.cpp",
     "SPIRV/doc.cpp",
     "SPIRV/SpvTools.cpp",
@@ -1371,6 +1388,7 @@ const fcpp_src_files = &.{
 };
 
 const shaderc_cpp_flags = &.{
+    "-std=c++20",
     "-fno-rtti",
     "-fno-sanitize=undefined",
 };
@@ -1382,10 +1400,10 @@ const shaderc_src_files = &.{
     "tools/shaderc/shaderc_metal.cpp",
     "tools/shaderc/shaderc_pssl.cpp",
     "tools/shaderc/shaderc_glsl.cpp",
+    "tools/shaderc/shaderc_dxil.cpp",
+    "tools/shaderc/shaderc_wgsl.cpp",
     "src/vertexlayout.cpp",
     "src/shader.cpp",
-    "src/shader_dxbc.cpp",
-    "src/shader_spirv.cpp",
 };
 
 const std = @import("std");
